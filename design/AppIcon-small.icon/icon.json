@@ -1,0 +1,53 @@
+{
+  "fill": {
+    "automatic-gradient": "extended-srgb:0.93725,0.90980,0.86275,1.00000"
+  },
+  "groups": [
+    {
+      "name": "Bookmark",
+      "layers": [
+        {
+          "image-name": "Bookmark.svg",
+          "name": "Bookmark",
+          "glass": false
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.18
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    },
+    {
+      "name": "Vinyl record",
+      "layers": [
+        {
+          "image-name": "Signal.svg",
+          "name": "Signal",
+          "glass": false
+        },
+        {
+          "image-name": "Record.svg",
+          "name": "Record",
+          "glass": false
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.22
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

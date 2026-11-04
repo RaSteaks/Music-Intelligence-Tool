@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="vinyl-sheen" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0.18" stop-color="#14181B"/>
+      <stop offset="0.45" stop-color="#202428"/>
+      <stop offset="0.51" stop-color="#33363A"/>
+      <stop offset="0.60" stop-color="#1B1E22"/>
+      <stop offset="0.82" stop-color="#14181B"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(512 512) scale(1.24) translate(-512 -512)">
+    <g id="vinyl">
+      <circle id="disc" cx="512" cy="512" r="334" fill="url(#vinyl-sheen)" />
+      <g id="grooves">
+        <circle cx="512" cy="512" r="124" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="131" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="138" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="145" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="152" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="159" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="166" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="173" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="180" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="187" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="194" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="201" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="222" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="229" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="236" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="243" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="250" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="257" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="264" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="278" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="285" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="292" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="299" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="306" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+        <circle cx="512" cy="512" r="313" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="320" fill="none" stroke="#fff" stroke-opacity="0.04" stroke-width="2" />
+        <circle cx="512" cy="512" r="327" fill="none" stroke="#fff" stroke-opacity="0.075" stroke-width="2" />
+      </g>
+      <g id="track-gaps">
+        <circle cx="512" cy="512" r="210" fill="none" stroke="#fff" stroke-opacity="0.10" stroke-width="5" />
+        <circle cx="512" cy="512" r="270" fill="none" stroke="#fff" stroke-opacity="0.10" stroke-width="5" />
+      </g>
+      <circle id="disc-edge" cx="512" cy="512" r="332" fill="none" stroke="#fff" stroke-opacity="0.14" stroke-width="3" />
+    </g>
+  </g>
+</svg>

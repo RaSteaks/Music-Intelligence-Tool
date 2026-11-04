@@ -1,0 +1,28 @@
+# 本地方案文档
+/docs/
+
+# Python 分析环境、模型与缓存
+/.venv/
+/.venv-*/
+/.models/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Xcode 个人设置、构建产物与测试报告
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+*.xcresult/
+*.xcarchive/
+*.dSYM/
+tmp/
+
+# 本机环境配置（保留可共享的示例）
+.env
+.env.local
+.env.*.local
+*.profraw
+# macOS Finder 元数据
+.DS_Store

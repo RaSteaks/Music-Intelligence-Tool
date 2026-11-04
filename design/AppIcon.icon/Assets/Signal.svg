@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="translate(512 512) scale(1.24) translate(-512 -512)">
+    <g id="waveform">
+      <g id="section-1">
+        <line x1="419.8" y1="414.8" x2="362.2" y2="354.2" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="436.1" y1="401.6" x2="358.7" y2="288.9" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="454.3" y1="391.1" x2="397.7" y2="272.3" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="473.9" y1="383.5" x2="453.7" y2="315.1" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="494.5" y1="379.1" x2="482.1" y2="285.1" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="515.5" y1="378.0" x2="518.7" y2="255.0" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="536.4" y1="380.2" x2="554.5" y2="282.7" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="556.7" y1="385.7" x2="574.3" y2="336.2" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="575.9" y1="394.2" x2="620.0" y2="313.2" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="593.6" y1="405.7" x2="668.6" y2="307.9" stroke="#66CCC2" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+      </g>
+      <g id="section-2">
+        <line x1="618.3" y1="430.4" x2="716.8" y2="354.9" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="629.8" y1="448.1" x2="690.7" y2="415.0" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="638.3" y1="467.3" x2="777.6" y2="417.9" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="643.8" y1="487.6" x2="808.2" y2="457.1" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="646.0" y1="508.5" x2="759.5" y2="505.5" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="644.9" y1="529.5" x2="729.8" y2="540.7" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="640.5" y1="550.1" x2="771.5" y2="588.9" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="632.9" y1="569.7" x2="747.7" y2="624.4" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="622.4" y1="587.9" x2="689.0" y2="633.7" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+        <line x1="609.2" y1="604.2" x2="676.4" y2="668.0" stroke="#F5B35C" stroke-opacity="1" stroke-width="12" stroke-linecap="round" />
+      </g>
+    </g>
+    <g id="boundary">
+      <line x1="606.8" y1="417.2" x2="742.5" y2="281.5" stroke="#F3EBDA" stroke-opacity="0.6" stroke-width="4" stroke-linecap="round" />
+    </g>
+    <g id="label">
+      <circle cx="512" cy="512" r="100" fill="#D9483A" />
+      <circle cx="512" cy="512" r="99" fill="none" stroke="#000" stroke-opacity="0.22" stroke-width="3" />
+      <circle cx="512" cy="512" r="88" fill="none" stroke="#FBEADF" stroke-opacity="0.28" stroke-width="3" />
+      <path d="M455.6,474.0 A68,68 0 0 1 568.4,474.0" fill="none" stroke="#FBEADF" stroke-opacity="0.5" stroke-width="10" stroke-linecap="round" />
+      <path d="M557.5,562.5 A68,68 0 0 1 466.5,562.5" fill="none" stroke="#FBEADF" stroke-opacity="0.32" stroke-width="6" stroke-linecap="round" />
+      <circle cx="512" cy="512" r="24" fill="none" stroke="#FBEADF" stroke-opacity="0.22" stroke-width="3" />
+      <circle id="spindle-hole" cx="512" cy="512" r="13" fill="#14181B" />
+    </g>
+  </g>
+</svg>
