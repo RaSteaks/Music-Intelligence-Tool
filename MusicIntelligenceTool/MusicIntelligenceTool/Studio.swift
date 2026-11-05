@@ -21,7 +21,7 @@ enum Runtime {
         #endif
         return URL.applicationSupportDirectory.appendingPathComponent("MusicIntelligenceTool/Runtime")
     }
-    static func process(_ script: String, args: [String], python: String = ".venv/bin/python") throws -> Process {
+    static func process(_ script: String, args: [String], python: String = ".venv/bin/python", root: URL = Runtime.root) throws -> Process {
         guard let file = Bundle.main.url(forResource: script, withExtension: "py") else {
             throw StudioError.message("应用缺少脚本 \(script)")
         }
@@ -43,7 +43,7 @@ enum Runtime {
 
 @MainActor @Observable
 final class Studio {
-    let modelEnvironment = ModelEnvironment()
+    let modelEnvironment: ModelEnvironment
     let root: URL
     var song: SongRecord?
     var selected: String?
@@ -87,6 +87,7 @@ final class Studio {
     init(root: URL? = nil) {
         let custom = ProcessInfo.processInfo.environment["MIT_LIBRARY"].map { URL(fileURLWithPath: $0) }
         self.root = root ?? custom ?? URL.applicationSupportDirectory.appendingPathComponent("MusicIntelligenceTool/Tracks")
+        modelEnvironment = ModelEnvironment(cacheDirectory: self.root.appendingPathComponent(".environment"))
     }
 
     var row: Mark? { song?.marks.first { $0.id == selected } }
@@ -166,10 +167,24 @@ final class Studio {
         cursor = max(0, min(song?.duration ?? 0, t))
         player?.currentTime = cursor
     }
+    func markPoint(_ edge: CueEdge) {
+        guard song != nil else { return }
+        let time = position
+        if edge == .entry {
+            // An explicit in-point starts a fresh pair, even inside the previous selection.
+            outPoint = nil
+        } else if let outPoint, time > outPoint {
+            inPoint = outPoint
+        } else if inPoint == nil || time < (inPoint ?? 0) {
+            // Start at zero for the first out-point, or when marking before the current in-point.
+            inPoint = 0
+        }
+        setPoint(edge, at: time)
+    }
     func setPoint(_ edge: CueEdge, at time: Double) {
         guard let song else { return }
         let t = min(song.duration, max(0, time))
-        // A new keyboard mark can start another selection beyond the previous endpoint.
+        // Handle edits preserve the opposite endpoint unless it would invert the range.
         switch edge {
         case .entry:
             if let outPoint, t > outPoint { self.outPoint = nil }
@@ -413,7 +428,7 @@ final class Studio {
         panel.canChooseDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         UserDefaults.standard.set(url.path, forKey: "runtime")
-        modelEnvironment.refresh()
+        modelEnvironment.checkIfNeeded(in: Runtime.root)
         restartMCP()
     }
     var mcpRunning: Bool { service != nil }

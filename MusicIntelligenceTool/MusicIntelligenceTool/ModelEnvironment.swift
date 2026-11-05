@@ -1,7 +1,9 @@
+import CryptoKit
+import Darwin
 import Foundation
 import Observation
 
-enum ModelFeature: String, CaseIterable, Identifiable {
+enum ModelFeature: String, Codable, CaseIterable, Identifiable {
     case base, structure, stems, lyrics, chinese = "align-zh", english = "align-en", emotion
     var id: Self { self }
     var title: String {
@@ -32,17 +34,24 @@ enum ModelFeature: String, CaseIterable, Identifiable {
     }
 }
 
-struct EnvironmentReport: Decodable {
-    enum State: String, Decodable { case ready, missing, blocked }
+struct EnvironmentReport: Codable {
+    enum State: String, Codable { case ready, missing, blocked }
+    struct Weight: Codable {
+        var name: String
+        var bytes: Int64?
+        var source: String
+        var url: URL?
+    }
     var state: State
     var detail: String
     var action: String?
     var python: String?
+    var weights: [Weight]?
 }
 
 @Observable @MainActor
 final class ModelEnvironment {
-    private(set) var directory = Runtime.root
+    private(set) var directory: URL
     private(set) var reports: [ModelFeature: EnvironmentReport] = [:]
     private(set) var errors: [ModelFeature: String] = [:]
     private(set) var active: ModelFeature?
@@ -50,12 +59,42 @@ final class ModelEnvironment {
     private(set) var stopping = false
     private(set) var progress = ""
     private(set) var ffmpeg: String?
+    private(set) var checkedAt: Date?
+    private(set) var cacheError: String?
+    private let cacheDirectory: URL
     private var process: Process?
     var isBusy: Bool { active != nil }
 
+    private struct Snapshot: Codable {
+        var reports: [ModelFeature: EnvironmentReport]
+        var errors: [ModelFeature: String]
+        var ffmpeg: String?
+        var checkedAt: Date
+    }
+
+    init(directory: URL = Runtime.root, cacheDirectory: URL) {
+        self.directory = directory.standardizedFileURL
+        self.cacheDirectory = cacheDirectory
+        restoreSnapshot()
+    }
+
+    func checkIfNeeded(in directory: URL? = nil) {
+        guard !isBusy else { return }
+        if let directory = directory?.standardizedFileURL, directory != self.directory {
+            self.directory = directory
+            reports.removeAll()
+            errors.removeAll()
+            ffmpeg = nil
+            checkedAt = nil
+            cacheError = nil
+            restoreSnapshot()
+        }
+        // A completed check has no expiry: page navigation must not launch model processes again.
+        if checkedAt == nil { refresh() }
+    }
+
     func refresh() {
         guard !isBusy else { return }
-        directory = Runtime.root
         reports.removeAll()
         errors.removeAll()
         let paths = [directory.appendingPathComponent(".venv/bin").path] + Runtime.toolPath.components(separatedBy: ":")
@@ -72,7 +111,14 @@ final class ModelEnvironment {
         downloading = download
         active = features.first
         Task {
-            defer { process = nil; active = nil; downloading = false; stopping = false; progress = "" }
+            defer {
+                // Keep the last complete snapshot if the app quits during a check or download.
+                if !stopping {
+                    if !download { checkedAt = Date() }
+                    saveSnapshot()
+                }
+                process = nil; active = nil; downloading = false; stopping = false; progress = ""
+            }
             for feature in features {
                 if stopping { break }
                 active = feature
@@ -93,6 +139,33 @@ final class ModelEnvironment {
         }
     }
 
+    private var cacheURL: URL {
+        let key = SHA256.hash(data: Data(directory.path.utf8)).map { String(format: "%02x", $0) }.joined()
+        return cacheDirectory.appendingPathComponent(key).appendingPathComponent("check.json")
+    }
+
+    private func restoreSnapshot() {
+        // Missing or incompatible saved data is a cache miss; a fresh check replaces it.
+        guard let data = try? Data(contentsOf: cacheURL),
+              let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+        reports = snapshot.reports
+        errors = snapshot.errors
+        ffmpeg = snapshot.ffmpeg
+        checkedAt = snapshot.checkedAt
+    }
+
+    private func saveSnapshot() {
+        guard let checkedAt else { return }
+        do {
+            try FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let snapshot = Snapshot(reports: reports, errors: errors, ffmpeg: ffmpeg, checkedAt: checkedAt)
+            try JSONEncoder().encode(snapshot).write(to: cacheURL, options: .atomic)
+            cacheError = nil
+        } catch {
+            cacheError = "检查结果未能保存：" + error.localizedDescription
+        }
+    }
+
     func cancel() {
         guard isBusy else { return }
         stopping = true
@@ -105,10 +178,10 @@ final class ModelEnvironment {
             return EnvironmentReport(state: .blocked, detail: "未找到 \(feature.environment)/bin/python")
         }
         let p = try Runtime.process("model_environment", args: [download ? "download" : "check",
-                                    feature.rawValue, directory.path], python: interpreter)
+                                    feature.rawValue, directory.path], python: interpreter, root: directory)
         let output = Pipe()
         p.standardOutput = output
-        let logs = URL.cachesDirectory.appendingPathComponent("MusicIntelligenceTool/Environment")
+        let logs = cacheURL.deletingLastPathComponent().appendingPathComponent("Logs")
         try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         let log = logs.appendingPathComponent(feature.rawValue + ".log")
         try Data().write(to: log)
@@ -120,8 +193,7 @@ final class ModelEnvironment {
         try output.fileHandleForWriting.close()
         var report: EnvironmentReport?
         var failure: String?
-        for try await line in output.fileHandleForReading.bytes.lines {
-            let data = Data(line.utf8)
+        for try await data in Self.eventLines(from: output.fileHandleForReading) {
             if let message = try? JSONDecoder().decode([String: String].self, from: data) {
                 if let step = message["progress"] { progress = step }
                 if let error = message["error"] { failure = error }
@@ -131,5 +203,39 @@ final class ModelEnvironment {
         if let failure { throw StudioError.message(failure + "\n日志：" + log.path) }
         guard let report else { throw StudioError.message("进程未返回检查结果。日志：\(log.path)") }
         return report
+    }
+
+    private static func eventLines(from reader: FileHandle) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { stream in
+            // On macOS an idle MCP bytes.lines read can stall other FileHandle.AsyncBytes
+            // readers. Drain this child independently and deliver progress before it exits.
+            DispatchQueue.global(qos: .utility).async {
+                var buffer = [UInt8](repeating: 0, count: 8192)
+                var line = Data()
+                while true {
+                    let count = read(reader.fileDescriptor, &buffer, buffer.count)
+                    if count < 0 {
+                        let code = errno
+                        if code == EINTR { continue }
+                        stream.finish(throwing: NSError(domain: NSPOSIXErrorDomain, code: Int(code)))
+                        return
+                    }
+                    if count == 0 {
+                        if !line.isEmpty { stream.yield(line) }
+                        stream.finish()
+                        return
+                    }
+                    // A read may split a UTF-8 character or contain several JSON events.
+                    var bytes = buffer.prefix(count)
+                    while let newline = bytes.firstIndex(of: 0x0A) {
+                        line.append(contentsOf: bytes[..<newline])
+                        stream.yield(line)
+                        line.removeAll(keepingCapacity: true)
+                        bytes = bytes.suffix(from: newline + 1)
+                    }
+                    line.append(contentsOf: bytes)
+                }
+            }
+        }
     }
 }

@@ -20,7 +20,14 @@ struct WaveformView: NSViewRepresentable {
     let onRange: (ClosedRange<Double>) -> Void
     let onResize: (String, Bool, Double) -> Void
 
-    func makeNSView(context: Context) -> WaveCanvas { WaveCanvas() }
+    func makeNSView(context: Context) -> WaveCanvas {
+        let view = WaveCanvas()
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.group)
+        view.setAccessibilityLabel("波形时间轴")
+        view.setAccessibilityIdentifier("waveform")
+        return view
+    }
     func updateNSView(_ view: WaveCanvas, context: Context) { view.input = self }
 }
 
@@ -37,9 +44,11 @@ final class WaveCanvas: NSView {
     private var dragTime: Double?
     private var resizing: (String, Bool)?
     private var movingPoint: CueEdge?
+    private var seeking = false
     private var keyMonitor: Any?
     private var picked: Mark?
     private var hits: [(rect: NSRect, row: Mark)] = []
+    private var rulerRect: NSRect { NSRect(x: 0, y: 0, width: bounds.width, height: 27) }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override func viewWillMove(toWindow newWindow: NSWindow?) {
@@ -125,6 +134,7 @@ final class WaveCanvas: NSView {
     override func resetCursorRects() {
         super.resetCursorRects()
         guard let i = input else { return }
+        addCursorRect(rulerRect, cursor: .resizeLeftRight)
         for edge in CueEdge.allCases {
             if let t = edge == .entry ? i.inPoint : i.outPoint, i.window.contains(t) {
                 addCursorRect(badge(edge, at: x(t)), cursor: .resizeLeftRight)
@@ -208,6 +218,12 @@ final class WaveCanvas: NSView {
         }
         let head = resizing == nil ? i.cursor : (dragTime ?? i.cursor)
         line(.init(x: x(head),y: 20),.init(x: x(head),y: bounds.height),amber)
+        let handle = NSBezierPath()
+        handle.move(to: .init(x: x(head)-4, y: 20))
+        handle.line(to: .init(x: x(head)+4, y: 20))
+        handle.line(to: .init(x: x(head), y: 26))
+        handle.close()
+        amber.setFill(); handle.fill()
         if let entry { drawPoint(.entry, at: entry) }
         if let exit { drawPoint(.exit, at: exit) }
     }
@@ -216,7 +232,11 @@ final class WaveCanvas: NSView {
         let p = convert(event.locationInWindow, from: nil)
         window?.makeFirstResponder(self)
         anchor = time(p.x,snap: false); dragTime = nil; resizing = nil
+        movingPoint = nil; picked = nil
+        // Fix the gesture at mouse-down so crossing into the waveform cannot turn a seek into a selection.
+        seeking = rulerRect.contains(p)
         if let i = input {
+            if seeking { i.onSeek(time(p.x, snap: false)); return }
             movingPoint = hitPoint(p, in: i)
             if movingPoint != nil { return }
         }
@@ -232,6 +252,11 @@ final class WaveCanvas: NSView {
         }
     }
     override func mouseDragged(with event: NSEvent) {
+        if seeking {
+            // Navigation stays continuous; beat snapping belongs to edits, as with a waveform click.
+            input?.onSeek(time(convert(event.locationInWindow, from: nil).x, snap: false))
+            return
+        }
         let t = time(convert(event.locationInWindow, from: nil).x,snap: !event.modifierFlags.contains(.option))
         if let edge = movingPoint, let i = input {
             let limit = edge == .entry ? min(t, i.outPoint ?? t) : max(t, i.inPoint ?? t)
@@ -242,7 +267,11 @@ final class WaveCanvas: NSView {
         needsDisplay = true
     }
     override func mouseUp(with event: NSEvent) {
-        defer { anchor=nil; dragTime=nil; resizing=nil; movingPoint=nil; picked=nil; needsDisplay=true }
+        defer { anchor=nil; dragTime=nil; resizing=nil; movingPoint=nil; picked=nil; seeking=false; needsDisplay=true }
+        if seeking {
+            input?.onSeek(time(convert(event.locationInWindow, from: nil).x, snap: false))
+            return
+        }
         if movingPoint != nil { return }
         guard let i = input, let a = anchor else { return }
         if let b = dragTime, let edge = resizing { i.onResize(edge.0,edge.1,b) }

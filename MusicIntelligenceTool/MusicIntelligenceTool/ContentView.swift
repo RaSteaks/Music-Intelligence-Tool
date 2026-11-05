@@ -37,6 +37,7 @@ struct ContentView: View {
                             Button { studio.togglePlayback() } label: { Image(systemName: studio.playing ? "pause.fill" : "play.fill") }
                                 .keyboardShortcut(.space, modifiers: []).accessibilityLabel("播放或暂停")
                             Text(clockText(studio.cursor)).font(.system(.title3, design: .monospaced))
+                                .accessibilityIdentifier("playheadTime")
                             Text("/ " + clockText(song.duration)).font(.caption.monospaced()).foregroundStyle(.secondary)
                             Spacer()
                             Toggle("循环", isOn: $studio.loop).toggleStyle(.button)
@@ -68,6 +69,7 @@ struct ContentView: View {
                             .frame(minHeight: 210, maxHeight: 350)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .accessibilityIdentifier("waveform")
+                            .help("在顶部时间尺点击或拖动可定位播放头；在波形上拖动可设置出入点。")
                         if studio.zoom > 1 {
                             TimelineNavigator(pan: $pan, window: window, duration: song.duration, peaks: studio.peaks)
                                 .zIndex(1)
@@ -86,6 +88,9 @@ struct ContentView: View {
                                 Text(pointReadout).font(.caption.monospacedDigit()).lineLimit(1)
                             }
                             .fixedSize()
+                            .accessibilityLabel("出入点")
+                            .accessibilityValue(pointReadout)
+                            .accessibilityIdentifier("cuePoints")
                         }
                         Picker("标注列表", selection: $tab) {
                             Text("段落").tag("section"); Text("歌词").tag("lyric"); Text("注释").tag("note")
@@ -217,7 +222,7 @@ struct ContentView: View {
         return "入 " + (studio.inPoint.map(clockText) ?? "—") + "   出 " + (studio.outPoint.map(clockText) ?? "—")
     }
     private func markAtPlayhead(_ edge: CueEdge) {
-        studio.setPoint(edge, at: studio.position)
+        studio.markPoint(edge)
     }
     static let lanes = [("section","段落"),("beat","拍点"),("downbeat","小节第一拍"),("onset","起音"),
                         ("acoustic","声学能量"),("emotion","情绪走势"),("lyric","歌词"),("word","字词"),

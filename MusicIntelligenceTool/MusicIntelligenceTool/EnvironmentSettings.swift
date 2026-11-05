@@ -21,6 +21,19 @@ struct EnvironmentSettings: View {
                             Text(feature.title).font(.headline)
                             if let report = models.reports[feature] {
                                 Text(report.detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                ForEach(report.weights ?? [], id: \.name) { weight in
+                                    let size = weight.bytes?.formatted(.byteCount(style: .decimal)) ?? "大小未知"
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text("\(weight.name) · \(size)")
+                                        if let url = weight.url {
+                                            Link(weight.source, destination: url)
+                                                .help(url.absoluteString)
+                                        } else {
+                                            Text(weight.source)
+                                        }
+                                    }
+                                    .font(.caption)
+                                }
                                 if report.state == .blocked {
                                     Text(feature.setupCommand).font(.caption.monospaced()).textSelection(.enabled)
                                 }
@@ -64,10 +77,18 @@ struct EnvironmentSettings: View {
                     Button("重新检查", action: models.refresh).disabled(models.isBusy)
                 }
             } footer: {
-                Text("检查只读取本机环境。点击下载后会连接模型发布源，权重保存在分析引擎使用的缓存中。")
+                VStack(alignment: .leading, spacing: 4) {
+                    if let checkedAt = models.checkedAt {
+                        Text("上次检查：\(checkedAt.formatted(date: .numeric, time: .shortened))。点击“重新检查”更新。")
+                    }
+                    Text("所列大小为完整权重大小，配置文件和 Python 依赖另计。检查仅使用本地文件，下载时会复用已有缓存。")
+                    if let cacheError = models.cacheError {
+                        Text(cacheError).foregroundStyle(.red)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
-        .onAppear { if !models.isBusy { models.refresh() } }
+        .onAppear { models.checkIfNeeded() }
     }
 }

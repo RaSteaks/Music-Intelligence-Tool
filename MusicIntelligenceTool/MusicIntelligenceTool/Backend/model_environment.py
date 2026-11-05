@@ -52,13 +52,29 @@ def fetch(url, target, expected=None):
         partial.unlink(missing_ok=True)
 
 
-def cached(ready, detail, action="下载模型"):
+def weight(name, size, source, url=None):
+    return {"name": name, "bytes": size, "source": source, "url": url}
+
+
+def cached(ready, detail, action="下载模型", *, weights=()):
     return {"state": "ready" if ready else "missing", "detail": detail,
-            "action": None if ready else action}
+            "action": None if ready else action, "weights": weights}
 
 
 def blocked(detail):
     return {"state": "blocked", "detail": detail, "action": None}
+
+
+# Publisher Content-Length by checkpoint filename. Use the resolved URL to handle aliases
+# such as "large" and "turbo" without duplicating the installed Whisper registry.
+WHISPER_BYTES = {
+    "tiny.pt": 75_572_083, "tiny.en.pt": 75_571_315,
+    "base.pt": 145_262_807, "base.en.pt": 145_261_783,
+    "small.pt": 483_617_219, "small.en.pt": 483_615_683,
+    "medium.pt": 1_528_008_539, "medium.en.pt": 1_528_006_491,
+    "large-v1.pt": 3_086_999_982, "large-v2.pt": 3_086_999_982,
+    "large-v3.pt": 3_087_371_615, "large-v3-turbo.pt": 1_617_941_637,
+}
 
 
 def whisper_weights(download):
@@ -68,7 +84,7 @@ def whisper_weights(download):
     if name not in whisper._MODELS:
         path = Path(name)
         if path.is_file() and path.stat().st_size:
-            return cached(True, str(path))
+            return cached(True, str(path), weights=[weight(path.name, path.stat().st_size, "本地文件")])
         return blocked(f"MIT_WHISPER_MODEL 指定的模型不存在：{name}")
     url = whisper._MODELS[name]
     directory = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "whisper"
@@ -78,7 +94,10 @@ def whisper_weights(download):
     if download and not ready:
         fetch(url, path, sha)
         ready = True
-    return cached(ready, f"Whisper {name} · {path}")
+    size = path.stat().st_size if ready else WHISPER_BYTES.get(path.name)
+    return cached(ready, f"Whisper {name} · {path}", weights=[
+        weight(path.name, size, "OpenAI · Whisper", "https://github.com/openai/whisper#available-models-and-languages")
+    ])
 
 
 def structure_weights(download):
@@ -96,12 +115,20 @@ def structure_weights(download):
                 loader._download_verified_file(filename, sha, loader._FALLBACK_CACHE_DIR)
         else:
             ready += 1
-    return cached(ready == len(folds), f"harmonix-all · {ready}/{len(folds)} 组权重已校验")
+    # Sum of the eight .npz blobs at this loader revision (excludes YAML configs).
+    revision = loader._FALLBACK_REVISION
+    size = 10_107_176 if revision == "da5f3474503fde41860b454a48bc9e7899cd5dfa" else None
+    return cached(ready == len(folds), f"harmonix-all · {ready}/{len(folds)} 组权重已校验", weights=[
+        weight(f"harmonix-all（{len(folds)} 组 NPZ）", size, "GitHub · all-in-one-mlx",
+               f"https://github.com/ssmall256/all-in-one-mlx/tree/{revision}/mlx-weights")
+    ])
 
 
 def stem_weights(download):
     from demucs_mlx.model_converter import get_mlx_cache_dir, get_mlx_model
 
+    weights = [weight("HTDemucs · 955717e8-8726e21a.th", 84_141_911, "Meta · Demucs",
+                      "https://github.com/facebookresearch/demucs/blob/main/demucs/remote/files.txt")]
     directory = get_mlx_cache_dir()
     config = directory / "htdemucs_config.json"
     if config.is_file():
@@ -110,7 +137,7 @@ def stem_weights(download):
         except (UnicodeError, json.JSONDecodeError):
             expected = None
         if expected and digest(directory / "htdemucs.safetensors") == expected:
-            return cached(True, f"HTDemucs · {directory}")
+            return cached(True, f"HTDemucs · {directory}", weights=weights)
     from packaging.version import Version
     needs_converter = (importlib.util.find_spec("demucs") is None
                        or importlib.util.find_spec("torch") is None
@@ -126,12 +153,13 @@ def stem_weights(download):
         get_mlx_model("htdemucs")
         return stem_weights(False)
     if needs_converter:
-        return cached(False, "缺少 HTDemucs 缓存及首次转换所需的依赖", "安装转换依赖并下载")
-    return cached(False, "HTDemucs · 需要下载并转换权重")
+        return cached(False, "首次转换还需下载 Python 依赖，大小随环境而定。", "安装转换依赖并下载", weights=weights)
+    return cached(False, "HTDemucs · 需要下载并转换权重", weights=weights)
 
 
-def hub_files(repo, files, download):
+def hub_files(repo, files, download, weight_bytes):
     from huggingface_hub import hf_hub_download, try_to_load_from_cache
+    from huggingface_hub.constants import ENDPOINT
     from transformers.utils.hub import TRANSFORMERS_CACHE
 
     present = 0
@@ -150,7 +178,10 @@ def hub_files(repo, files, download):
             emit(progress=f"{repo} · {index}/{len(files)} · {name}")
             hf_hub_download(repo, name, cache_dir=TRANSFORMERS_CACHE, force_download=path is not None)
             present += 1
-    return cached(present == len(files), f"{repo} · {present}/{len(files)} 个文件已缓存")
+    return cached(present == len(files), f"{repo} · {present}/{len(files)} 个文件已缓存", weights=[
+        weight(f"{repo.split('/')[-1]} · pytorch_model.bin", weight_bytes, "Hugging Face",
+               f"{ENDPOINT}/{repo}/blob/main/pytorch_model.bin")
+    ])
 
 
 def emotion_weights(root, download):
@@ -169,9 +200,13 @@ def emotion_weights(root, download):
             fetch(f"https://raw.githubusercontent.com/AMAAI-Lab/Music2Emotion/{revision}/{name}", repo/name, sha)
             present += 1
     mert = hub_files("m-a-p/MERT-v1-95M", ["config.json", "preprocessor_config.json", "configuration_MERT.py",
-                                            "modeling_MERT.py", "pytorch_model.bin"], download)
+                                            "modeling_MERT.py", "pytorch_model.bin"], download, 377_552_987)
     return cached(present == len(heads) and mert["state"] == "ready",
-                  f"Music2Emo {present}/2 · {mert['detail']}")
+                  f"Music2Emo {present}/2 · {mert['detail']}", weights=[
+                      weight("J_all.ckpt + btc_model_large_voca.pt", 12_958_092 + 12_229_576, "GitHub · Music2Emotion",
+                             f"https://github.com/AMAAI-Lab/Music2Emotion/tree/{revision}"),
+                      *mert["weights"],
+                  ])
 
 
 def alignment_weights(language, download):
@@ -182,10 +217,13 @@ def alignment_weights(language, download):
         path = Path(torch.hub.get_dir()) / "checkpoints" / Path(name).name
         if download and not (path.is_file() and path.stat().st_size):
             fetch(f"https://download.pytorch.org/torchaudio/models/{name}", path)
-        return cached(path.is_file() and path.stat().st_size > 0, f"Wav2Vec2 English · {path.name}")
+        return cached(path.is_file() and path.stat().st_size > 0, f"Wav2Vec2 English · {path.name}", weights=[
+            weight(path.name, 377_664_473 if name == "wav2vec2_fairseq_base_ls960_asr_ls960.pth" else None,
+                   "PyTorch · torchaudio", "https://docs.pytorch.org/audio/stable/pipelines.html#torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H")
+        ])
     return hub_files("jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
                      ["config.json", "preprocessor_config.json", "vocab.json", "special_tokens_map.json",
-                      "pytorch_model.bin"], download)
+                      "pytorch_model.bin"], download, 1_276_296_151)
 
 
 PACKAGES = {"base": ("mcp", "numpy", "librosa"), "structure": ("all-in-one-mlx", "mlx", "natten-mlx"),
