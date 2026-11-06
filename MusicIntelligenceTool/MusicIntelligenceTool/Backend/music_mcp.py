@@ -41,7 +41,7 @@ def effective(row, confirmed_only=False):
 
 
 @server.tool()
-def analyze_music(path: str) -> dict:
+def analyze_music(path: str) -> dict[str, object]:
     """Open a local audio file in the running App and schedule missing analyses. Returns track_id and status."""
     source = Path(path).expanduser().resolve(strict=True)
     if source.suffix.lower() not in (".wav", ".mp3", ".flac", ".m4a") or not source.is_file():
@@ -59,7 +59,7 @@ def analyze_music(path: str) -> dict:
 
 
 @server.tool()
-def get_music_overview(track_id: str) -> dict:
+def get_music_overview(track_id: str) -> dict[str, object]:
     """Return the latest saved revision, module status, duration, tempo, key, sections and emotion windows."""
     song = read_song(track_id)
     return {"track_id": track_id, "revision": song["revision"], "duration_s": song["duration"],
@@ -69,8 +69,15 @@ def get_music_overview(track_id: str) -> dict:
 
 
 @server.tool()
+def get_music_record(track_id: str) -> dict[str, object]:
+    """Return the complete saved analysis record, including original model suggestions, user confirmations,
+    hints, metrics, module status and local audio/stem paths. Audio file contents are not included."""
+    return read_song(track_id)
+
+
+@server.tool()
 def get_music_timeline(track_id: str, start_s: float, end_s: float, types: list[str] | None = None,
-                       confirmed_only: bool = False) -> dict:
+                       confirmed_only: bool = False) -> dict[str, object]:
     """Query [start_s,end_s) in original audio seconds. Types: section, beat, downbeat, onset, acoustic,
     emotion, chord, lyric, word, note. Hints are separate from confirmed values."""
     if not (math.isfinite(start_s) and math.isfinite(end_s) and 0 <= start_s < end_s):
@@ -89,4 +96,11 @@ def get_music_timeline(track_id: str, start_s: float, end_s: float, types: list[
 
 
 if __name__ == "__main__":
-    server.run(transport="streamable-http")
+    import asyncio
+    import uvicorn
+
+    # stdout is the Swift command pipe. HTTP access logs must never be parsed as App requests.
+    app = server.streamable_http_app()
+    config = uvicorn.Config(app, host=server.settings.host, port=server.settings.port,
+                            log_level=server.settings.log_level.lower(), access_log=False)
+    asyncio.run(uvicorn.Server(config).serve())

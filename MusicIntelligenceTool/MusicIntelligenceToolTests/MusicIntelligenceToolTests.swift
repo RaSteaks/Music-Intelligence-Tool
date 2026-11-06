@@ -4,32 +4,36 @@ import Testing
 
 @MainActor
 struct MusicIntelligenceToolTests {
-    @Test func agentMessageContainsSavedHintsAndReadyToUseQueries() throws {
+    @Test func agentMessagePreservesCompleteRecordAndOriginalModelSuggestions() throws {
         var song = SongRecord(url: URL(fileURLWithPath: "/private/example/练习.wav"), duration: 12.375)
         let hint = "第 3 秒像是“鼓点”\n请试听"
         song.marks[0].fields["mood"] = ReviewedText(confirmed: "紧张", hint: hint)
         let note = Mark.manual("note", from: 3, to: 3, label: "入鼓")
         song.marks += [note, Mark(kind: "beat", start: 3, end: 3, source: "model")]
+        song.marks[0].fields["mood"]?.suggested = "平静"
+        song.marks.append(Mark(kind: "acoustic", start: 0, end: 1, source: "librosa", metrics: ["rms": 0.25]))
+        song.status = ["acoustics": "完成"]
+        song.stems = ["人声": "/private/example/vocals.wav"]
 
         let endpoint = "http://127.0.0.1:18765/mcp"
         let message = try song.agentMessage(mcpEndpoint: endpoint)
         #expect(message.contains(endpoint))
         #expect(message.contains("练习.wav"))
         let lines = message.components(separatedBy: "\n")
-        for name in ["get_music_overview", "get_music_timeline"] {
+        for name in ["get_music_record"] {
             let line = try #require(lines.first { $0.hasPrefix(name + " ") })
             let json = Data(line.dropFirst(name.count + 1).utf8)
             let args = try #require(try JSONSerialization.jsonObject(with: json) as? [String: Any])
             #expect(args["track_id"] as? String == song.trackID)
-            if name == "get_music_timeline" {
-                #expect(args["end_s"] as? Double == song.duration)
-                #expect(args["confirmed_only"] as? Bool == false)
-                #expect(args["types"] as? [String] == ["note", "section"])
-            }
         }
         let snapshot = try #require(lines.last)
-        let marks = try JSONDecoder().decode([Mark].self, from: Data(snapshot.utf8))
-        #expect(marks == [song.marks[0], note])
+        let record = try JSONDecoder().decode(SongRecord.self, from: Data(snapshot.utf8))
+        #expect(record.marks == song.marks)
+        #expect(record.path == song.path)
+        #expect(record.stems == song.stems)
+        #expect(record.status == song.status)
+        #expect(record.revision == song.revision)
+        #expect(record.schemaVersion == song.schemaVersion)
     }
 
     @Test func correctedBoundarySurvivesLateResultsAndReopen() throws {

@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var inspector = true
     @State private var showStatus = false
     @State private var copyReceipt: UUID?
+    @State private var isDropTargeted = false
     @AppStorage(CueEdge.entry.preference) private var inShortcut = CueEdge.entry.defaultKey
     @AppStorage(CueEdge.exit.preference) private var outShortcut = CueEdge.exit.defaultKey
     private let timer = Timer.publish(every: 1/15, on: .main, in: .common).autoconnect()
@@ -144,6 +145,10 @@ struct ContentView: View {
                     if copyReceipt != nil {
                         Label("已复制，可粘贴给 agent", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.secondary)
+                    } else if let status = studio.agentSendStatus {
+                        Text(status).lineLimit(1).help(status)
+                            .accessibilityIdentifier("agentSendStatus")
+                            .foregroundStyle(.secondary)
                     }
                     Spacer()
                     if let job = studio.activeJob { ProgressView().controlSize(.small); Text(job.title); Button("取消",action:studio.cancel) }
@@ -153,7 +158,7 @@ struct ContentView: View {
                 VStack(spacing: 18) {
                     Image(systemName:"waveform.path").font(.system(size:52,weight:.light)).foregroundStyle(.teal)
                     Text("音乐分析工作台").font(.largeTitle.weight(.semibold))
-                    Text("导入歌曲，在波形上试听、分段并校对。").foregroundStyle(.secondary)
+                    Text("将音频文件拖入工作区，或点击下方按钮打开。").foregroundStyle(.secondary)
                     Button("打开音频…",action:studio.chooseFile).buttonStyle(.borderedProminent).controlSize(.large)
                     Button("试听内置练习曲",action:studio.openStudy).accessibilityIdentifier("openStudy")
                     Text("WAV  /  MP3  /  FLAC  /  M4A").font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -189,6 +194,28 @@ struct ContentView: View {
             }
         }
         .frame(minWidth:830,minHeight:580)
+        .contentShape(Rectangle())
+        .dropDestination(for: URL.self) { urls, _ in
+            guard page == .workspace else { return false }
+            return studio.openDroppedAudio(urls)
+        } isTargeted: { targeted in
+            isDropTargeted = targeted && page == .workspace
+        }
+        .overlay {
+            if isDropTargeted && page == .workspace {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8).fill(.teal.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(.teal, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                    Label("松开以打开音频", systemImage: "arrow.down.doc")
+                        .font(.headline).padding(14)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .padding(8)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
         .onReceive(timer) { _ in studio.tick() }
         .onChange(of:studio.song?.trackID) { pan=0; tab="section"; copyReceipt=nil }
         .task(id: copyReceipt) {
@@ -288,9 +315,14 @@ private struct ReviewPanel: View {
             TextField("给分析的提示",text:$hint,axis:.vertical).lineLimit(2...4)
             HStack {
                 Button("保存提示") { update(confirm:false) }
-                Button("发送给 agent", systemImage: "document.on.clipboard", action: onCopyForAgent)
+                Button("发送给 agent", systemImage: "paperplane") { Task { await studio.sendToAgent() } }
                     .labelStyle(.iconOnly)
-                    .help("发送给 agent：复制当前歌曲的已保存标注和 MCP 查询指令")
+                    .disabled(studio.sendingToAgent)
+                    .accessibilityIdentifier("sendToAgent")
+                    .help("将当前歌曲的完整分析记录发送给 Claude Code")
+                Button("复制交接文本", systemImage: "document.on.clipboard", action: onCopyForAgent)
+                    .labelStyle(.iconOnly)
+                    .help("复制完整分析记录和 MCP 查询指令，可手动粘贴给 agent")
             }
             if let song = studio.song, row.kind == "section" {
                 let summary = song.summary(for:row)

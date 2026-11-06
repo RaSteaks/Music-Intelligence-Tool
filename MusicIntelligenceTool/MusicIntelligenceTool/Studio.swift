@@ -43,6 +43,7 @@ enum Runtime {
 
 @MainActor @Observable
 final class Studio {
+    static let audioContentTypes = ["wav", "mp3", "flac", "m4a"].compactMap { UTType(filenameExtension: $0) }
     let modelEnvironment: ModelEnvironment
     let root: URL
     var song: SongRecord?
@@ -69,6 +70,13 @@ final class Studio {
     var visibleKinds: Set<String> = ["section", "note"]
     var notice: String?
     var serviceStatus = "未启动"
+    private var agentSendID: UUID?
+    var sendingToAgent: Bool { agentSendID != nil }
+    private(set) var agentSendStatus: String?
+    static var channelEndpoint: URL {
+        let port = ProcessInfo.processInfo.environment["MIT_CHANNEL_PORT"].flatMap(Int.init) ?? 18766
+        return URL(string: "http://127.0.0.1:\(port)/handoff")!
+    }
     static let defaultMCPPort = 18765
     /// MIT_MCP_PORT (used by tests) overrides the port chosen in Settings.
     static let portOverride = ProcessInfo.processInfo.environment["MIT_MCP_PORT"].flatMap { Int($0) }
@@ -96,9 +104,30 @@ final class Studio {
 
     func chooseFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = ["wav", "mp3", "flac", "m4a"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = Self.audioContentTypes
         if panel.runModal() == .OK, let url = panel.url {
             do { try open(url) } catch { notice = error.localizedDescription }
+        }
+    }
+
+    func openDroppedAudio(_ urls: [URL]) -> Bool {
+        guard urls.count == 1 else {
+            notice = "请一次拖入一个音频文件。"
+            return false
+        }
+        let url = urls[0]
+        guard url.isFileURL, let type = UTType(filenameExtension: url.pathExtension.lowercased()),
+              Self.audioContentTypes.contains(where: { type.conforms(to: $0) }) else {
+            notice = "请拖入本地音频文件，支持 WAV、MP3、FLAC 或 M4A。"
+            return false
+        }
+        do {
+            // Use the same import path so drops preserve saved edits and respect active analysis jobs.
+            try open(url)
+            return true
+        } catch {
+            notice = error.localizedDescription
+            return false
         }
     }
 
@@ -122,6 +151,10 @@ final class Studio {
         player?.stop()
         player = audio
         song = record
+        // Invalidate old receipts even when switching away and back to the same track.
+        // The agent can still read the previous snapshot, but it no longer owns this workspace's status.
+        agentSendID = nil
+        agentSendStatus = nil
         selected = record.sections.first?.id
         playing = false
         stem = "原曲"
@@ -275,6 +308,58 @@ final class Studio {
             visibleKinds.insert(kind)
         }
     }
+    func sendToAgent() async {
+        guard !sendingToAgent, let song else { return }
+        let endpoint = Self.channelEndpoint
+        // Capture the clicked revision before awaiting: analysis and edits may continue during delivery.
+        let sendID = UUID()
+        agentSendID = sendID
+        agentSendStatus = "正在发送完整分析记录…"
+        defer {
+            // An older request must not unlock the send button for a newer handoff.
+            if agentSendID == sendID { agentSendID = nil }
+        }
+        struct Receipt: Decodable {
+            var handoff_id: String
+            var status: String
+        }
+        do {
+            var request = URLRequest(url: endpoint, timeoutInterval: 3)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(song)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard agentSendID == sendID else { return }
+            guard (response as? HTTPURLResponse)?.statusCode == 202 else {
+                throw StudioError.message("音乐接收服务未接受记录，请检查 Claude Code 的 Channel 配置后重试。")
+            }
+            let receipt = try JSONDecoder().decode(Receipt.self, from: data)
+            agentSendStatus = "已通知 Claude Code，等待读取完整记录…"
+            let statusURL = endpoint.appendingPathComponent(receipt.handoff_id)
+            for _ in 0..<60 {
+                try await Task.sleep(for: .milliseconds(500))
+                guard agentSendID == sendID else { return }
+                let (statusData, statusResponse) = try await URLSession.shared.data(for: URLRequest(url: statusURL, timeoutInterval: 3))
+                guard agentSendID == sendID else { return }
+                guard (statusResponse as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw StudioError.message("音乐接收服务已重启或交接记录已失效，请重新发送。")
+                }
+                let delivery = try JSONDecoder().decode(Receipt.self, from: statusData)
+                if delivery.status == "read" {
+                    agentSendStatus = "Claude Code 已读取完整记录（修订 \(song.revision)）"
+                    return
+                }
+                if delivery.status == "reading" { agentSendStatus = "Claude Code 正在读取完整记录…" }
+            }
+            // Channels do not acknowledge notifications. A queued event must never look like confirmed delivery.
+            agentSendStatus = "已通知 Claude Code，尚未确认读取；请检查 Channel 是否启用。"
+        } catch {
+            guard agentSendID == sendID else { return }
+            agentSendStatus = "未确认发送，请检查 Claude Code 连接后重试。"
+            notice = "无法确认 Claude Code 已读取记录。请先启动音乐接收服务，再重试。\n" + error.localizedDescription
+        }
+    }
+
     func exportJSON() {
         guard let song else { return }
         let panel = NSSavePanel()

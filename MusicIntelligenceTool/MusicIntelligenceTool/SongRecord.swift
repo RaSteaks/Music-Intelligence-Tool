@@ -195,25 +195,20 @@ struct SongRecord: Codable {
     }
 
     func agentMessage(mcpEndpoint: String) throws -> String {
-        // Include the editorial work even when the receiving agent cannot reach the local MCP server.
-        let annotations = marks.filter { $0.kind == "section" || $0.kind == "note" || $0.reviewed }
-            .sorted { ($0.start, $0.end, $0.id) < ($1.start, $1.end, $1.id) }
+        // The manual fallback preserves the same complete record as the MCP handoff.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let snapshot = String(decoding: try encoder.encode(annotations), as: UTF8.self)
-        let types = Set(annotations.map(\.kind)).union(["section", "note"]).sorted()
-        let typesJSON = String(decoding: try encoder.encode(types), as: UTF8.self)
+        let snapshot = String(decoding: try encoder.encode(self), as: UTF8.self)
         let details = [bpm.map { "\($0) BPM" }, key].compactMap { $0 }.joined(separator: " · ")
         return """
         请按时间顺序整理《\(URL(fileURLWithPath: path).lastPathComponent)》的分段与标注。全曲时长 \(duration) 秒，当前保存修订号为 \(revision)。\(details.isEmpty ? "" : " " + details)
         请区分已确认内容（confirmed）、模型或初始建议（suggested）和待核对的人工提示（hint）。
 
         已连接本机 Music Intelligence Tool MCP（\(mcpEndpoint)）时，请按以下工具名和参数读取最新记录：
-        get_music_overview {"track_id":"\(trackID)"}
-        get_music_timeline {"track_id":"\(trackID)","start_s":0,"end_s":\(duration),"types":\(typesJSON),"confirmed_only":false}
-        查询结果的 hints 是人工提示。请保留它们，并注明哪些判断需要试听核对。
+        get_music_record {"track_id":"\(trackID)"}
+        请保留人工提示，并注明哪些判断需要试听核对。本地音频和分轨仅包含路径，不包含音频文件内容。
 
-        已保存的分段、注释及人工校对快照（时间单位为秒）：
+        已保存的完整分析记录快照（时间单位为秒）：
         \(snapshot)
         """
     }

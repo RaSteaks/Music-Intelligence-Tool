@@ -91,7 +91,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                     async with ClientSession(read,write) as session:
                         await session.initialize()
                         self.assertEqual({t.name for t in (await session.list_tools()).tools},
-                                         {"analyze_music","get_music_overview","get_music_timeline"})
+                                         {"analyze_music","get_music_overview","get_music_timeline","get_music_record"})
                         request = asyncio.create_task(session.call_tool("analyze_music",{"path":str(APP/"Study.wav")}))
                         message = json.loads(await asyncio.wait_for(process.stdout.readline(), 5))
                         self.assertEqual(message["path"], str(APP/"Study.wav"))
@@ -99,7 +99,11 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                         await process.stdin.drain()
                         self.assertFalse((await request).isError)
                         overview = await session.call_tool("get_music_overview",{"track_id":track})
+                        self.assertFalse(overview.isError, overview.content)
+                        self.assertIsNotNone(overview.structuredContent, overview.content)
                         self.assertEqual(overview.structuredContent["revision"],1)
+                        record = await session.call_tool("get_music_record", {"track_id": track})
+                        self.assertEqual(record.structuredContent, song)
                         params = dict(track_id=track,start_s=0,end_s=12,confirmed_only=True)
                         timeline = (await session.call_tool("get_music_timeline",params)).structuredContent
                         self.assertEqual(len(timeline["items"]),1)
@@ -111,8 +115,9 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                         invalid = await session.call_tool("get_music_overview",{"track_id":"../secret"})
                         self.assertTrue(invalid.isError)
             finally:
+                process.stdin.close()
                 process.terminate()
-                await process.wait()
+                await asyncio.wait_for(process.wait(), 5)
 
 
 if __name__ == "__main__":

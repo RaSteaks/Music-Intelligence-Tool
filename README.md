@@ -61,16 +61,18 @@
 ### 交给 agent
 
 - **导出 JSON**：保存当前歌曲完整的分析记录，包括模型建议、人工确认值、提示和数据来源。
-- **发送给 agent**：点击「保存提示」右侧的剪贴板图标，会复制当前歌曲已保存的分段、注释、校对内容，以及现成的 MCP 查询指令，可以直接粘贴到对话里。
+- **发送给 agent**：点击「保存提示」右侧的纸飞机图标，通过本机 MCP Channel 通知 Claude Code 读取当前歌曲的完整分析记录。保留模型建议、人工确认、提示、声学指标、模块状态和分轨路径；点击时的修订会固定下来，后续编辑不影响这次交接。首次使用需按下文配置 Claude Code Channel。
+- **复制交接文本**：旁边的剪贴板图标会复制完整分析记录及 MCP 查询指令，供其他 agent 或未启用 Channel 时手动粘贴。
 - **MCP 服务**：App 启动时会在本机 `http://127.0.0.1:18765/mcp` 提供服务，只监听本机。端口可以在 **设置 → MCP 服务** 中修改。
 
 | 工具 | 用途 |
 |---|---|
 | `analyze_music(path)` | 在 App 中打开本地音频，补跑尚未完成的分析，返回 `track_id` 和状态 |
 | `get_music_overview(track_id)` | 读取保存修订号、模块状态、时长、BPM、调性、段落和情绪窗口 |
+| `get_music_record(track_id)` | 原样读取完整保存记录，同时保留模型建议、人工确认、提示、指标、原曲和分轨路径 |
 | `get_music_timeline(track_id, start_s, end_s, types, confirmed_only)` | 按时间区间和类型读取拍点、歌词、和弦、情绪、事件或注释，可以只取人工确认的内容 |
 
-返回值的规则和界面一致：有人工确认就返回确认值，来源标为 `user`；没有就返回模型建议，并标明是哪个模块给出的。人工提示单独列在 `hints` 中。
+概览和时间轴查询的规则与界面一致：有人工确认就返回确认值，来源标为 `user`；没有就返回模型建议，并标明是哪个模块给出的。人工提示单独列在 `hints` 中。`get_music_record` 保留原始记录结构，不合并 `suggested`、`confirmed` 和 `hint`。这些接口传递分析记录，不传输音频文件内容。
 
 ## 使用
 
@@ -105,7 +107,7 @@
 
 1. 用 Xcode 打开 `MusicIntelligenceTool/MusicIntelligenceTool.xcodeproj`，运行目标选择 **My Mac**，按 `⌘R` 运行。也可以在终端运行 `./script/build_and_run.sh`。
 2. 点击工具栏中间的「设置」（或按 `⌘,`）切到设置页，在 **分析环境** 中点「运行目录」旁的「选择…」，选中本仓库根目录。从 Xcode 运行时，如果仓库里已经有 `.venv`，App 会自动使用它。设置完成后，点「工作区」回到编辑界面。
-3. 点击「打开音频…」导入 WAV、MP3、FLAC 或 M4A 文件。想先熟悉操作，可以点「试听内置练习曲」，不安装模型也能编辑。
+3. 点击「打开音频…」，或从 Finder 将一个 WAV、MP3、FLAC 或 M4A 文件直接拖入工作区。已有音频时，拖入新文件会切换歌曲并恢复其保存的标注；分析进行中请先等待或取消后再切换。想先熟悉操作，可以点「试听内置练习曲」，不安装模型也能编辑。
 
 如果音频或运行目录位于「桌面」，macOS 首次询问访问权限时请点「允许」。若此前拒绝，可在 **系统设置 → 隐私与安全性 → 文件与文件夹 → MusicIntelligenceTool → 桌面文件夹** 中开启。Xcode 的 Debug 和 Release 配置均已声明桌面访问用途。
 
@@ -137,7 +139,27 @@ claude mcp add --transport http music-intelligence http://127.0.0.1:18765/mcp
 
 如果端口被其他程序占用，**设置 → MCP 服务** 会提示，在那里换一个端口即可，服务会自动重启。换端口后，agent 中登记的地址也要同步更新。
 
-连接后，可以先粘贴「发送给 agent」复制的内容，agent 会按里面的指令查询这首歌的最新记录。App 退出后，导出的 JSON 仍然可以单独读取。
+连接后，可以让 agent 调用 `get_music_record(track_id)` 读取完整记录，也可以粘贴「复制交接文本」生成的内容。App 退出后，导出的 JSON 仍然可以单独读取。
+
+### 直接发送给 Claude Code
+
+普通 HTTP MCP 连接用于 agent 主动查询。点击按钮直接通知当前 Claude Code 会话，需要另外启用 [Claude Code Channels](https://code.claude.com/docs/en/channels-reference)。这是 Claude Code 的研究预览功能；自定义 Channel 需要使用官方提供的开发加载参数，Team 和 Enterprise 还需组织策略允许。
+
+在仓库根目录注册本地 stdio Channel，然后启动 Claude Code：
+
+```sh
+claude mcp add --transport stdio music-intelligence-channel -- \
+  "$PWD/.venv/bin/python" \
+  "$PWD/MusicIntelligenceTool/MusicIntelligenceTool/Backend/music_channel.py"
+
+claude --dangerously-load-development-channels server:music-intelligence-channel
+```
+
+按 Claude Code 显示的提示确认加载本地开发 Channel。保持会话打开，在 App 中点击「发送给 agent」即可。接收服务只监听 `127.0.0.1:18766`；它接收当前完整记录，通过 MCP 通知 Claude，并提供 `get_music_handoff(handoff_id, offset, limit)` 分页读取，每页最多 100 个条目。Claude 应持续读取到 `next_offset` 为 `null`，按顺序合并各页的 `record.marks`；每页都保留其余完整元数据。
+
+底部状态会区分「已通知」「正在读取」和「已读取完整记录」。只有 agent 实际读取全部条目后才显示已读取；30 秒内未确认读取会提示检查 Channel。切换歌曲会清除旧交接提示，并允许立即发送新歌曲；已排队的事件仍可在原会话中继续读取。Channel 事件本身不保证 Claude 已处理数据，也不表示它已经完成总结。交接快照只保存在接收服务当前会话的内存里，服务重启后需要重新发送。
+
+未启动 Channel、端口被占用或客户端不支持此功能时，可以使用「复制交接文本」或「导出 JSON」。如需修改 Channel 端口，在 App 和启动 Channel 的终端中同时设置 `MIT_CHANNEL_PORT`。一个端口对应一个接收会话；多个会话需要使用不同端口。
 
 <details>
 <summary>可选的环境变量</summary>
@@ -145,6 +167,7 @@ claude mcp add --transport http music-intelligence http://127.0.0.1:18765/mcp
 | 变量 | 作用 | 默认值 |
 |---|---|---|
 | `MIT_MCP_PORT` | MCP 服务端口，优先于设置页中的端口 | `18765` |
+| `MIT_CHANNEL_PORT` | App 与 Claude Code Channel 使用的本机接收端口，需两端一致 | `18766` |
 | `MIT_WHISPER_MODEL` | 逐句歌词使用的 Whisper 模型 | `base` |
 | `MIT_LYRIC_LANGUAGE` | 字词对齐的语言 | 根据歌词自动判断中文或英文 |
 | `MIT_LIBRARY` | 歌曲记录的保存目录 | `~/Library/Application Support/MusicIntelligenceTool/Tracks` |
