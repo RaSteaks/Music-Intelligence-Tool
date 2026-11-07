@@ -4,38 +4,6 @@ import Testing
 
 @MainActor
 struct MusicIntelligenceToolTests {
-    @Test func agentMessagePreservesCompleteRecordAndOriginalModelSuggestions() throws {
-        var song = SongRecord(url: URL(fileURLWithPath: "/private/example/练习.wav"), duration: 12.375)
-        let hint = "第 3 秒像是“鼓点”\n请试听"
-        song.marks[0].fields["mood"] = ReviewedText(confirmed: "紧张", hint: hint)
-        let note = Mark.manual("note", from: 3, to: 3, label: "入鼓")
-        song.marks += [note, Mark(kind: "beat", start: 3, end: 3, source: "model")]
-        song.marks[0].fields["mood"]?.suggested = "平静"
-        song.marks.append(Mark(kind: "acoustic", start: 0, end: 1, source: "librosa", metrics: ["rms": 0.25]))
-        song.status = ["acoustics": "完成"]
-        song.stems = ["人声": "/private/example/vocals.wav"]
-
-        let endpoint = "http://127.0.0.1:18765/mcp"
-        let message = try song.agentMessage(mcpEndpoint: endpoint)
-        #expect(message.contains(endpoint))
-        #expect(message.contains("练习.wav"))
-        let lines = message.components(separatedBy: "\n")
-        for name in ["get_music_record"] {
-            let line = try #require(lines.first { $0.hasPrefix(name + " ") })
-            let json = Data(line.dropFirst(name.count + 1).utf8)
-            let args = try #require(try JSONSerialization.jsonObject(with: json) as? [String: Any])
-            #expect(args["track_id"] as? String == song.trackID)
-        }
-        let snapshot = try #require(lines.last)
-        let record = try JSONDecoder().decode(SongRecord.self, from: Data(snapshot.utf8))
-        #expect(record.marks == song.marks)
-        #expect(record.path == song.path)
-        #expect(record.stems == song.stems)
-        #expect(record.status == song.status)
-        #expect(record.revision == song.revision)
-        #expect(record.schemaVersion == song.schemaVersion)
-    }
-
     @Test func correctedBoundarySurvivesLateResultsAndReopen() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -53,6 +21,7 @@ struct MusicIntelligenceToolTests {
         #expect(saved.sections.first?.end == 41.8)
         #expect(saved.sections.last?.startConfirmed == true)
         #expect(saved.marks.first(where: { $0.kind=="lyric" })?.label == "原词")
+        #expect(saved.hasCompleted(.lyrics, in: 0...60))
         let i = try #require(song.marks.firstIndex(where: { $0.id==verse.id }))
         song.marks[i].fields["label"]?.confirmed = "校对词"
         song.apply(JobResult(marks:[verse]),job:.lyrics,range:0..<60)
@@ -77,6 +46,39 @@ struct MusicIntelligenceToolTests {
         #expect(song.status["alignment"] == "待更新")
         song.mergeNext(lyric.id)
         #expect(song.marks.filter { $0.kind=="lyric" }.count == 1)
+        // Local analysis joins the same editing workflow: scoped replacement,
+        // independent stem lanes and coverage-aware section summaries.
+        let activity = Mark(kind: "event", start: 0, end: 10, source: "PCM",
+                            fields: ["event_type": ReviewedText(suggested: "vocals")])
+        song.marks.append(activity)
+        let fresh = Mark(kind: "event", start: 4, end: 6, source: "PCM",
+                         fields: ["event_type": ReviewedText(suggested: "vocals")])
+        song.apply(JobResult(marks: [fresh]), job: .events, range: 4..<6)
+        #expect(song.marks.filter { $0.kind == "event" }.sorted { $0.start < $1.start }.map(\.start) == [0, 4, 6])
+        #expect(song.hasCompleted(.events, in: 4...6) && !song.hasCompleted(.events, in: 0...10))
+        let eventIndex = try #require(song.marks.firstIndex { $0.id == fresh.id })
+        song.marks[eventIndex].fields["label"] = ReviewedText(confirmed: "人声已核对")
+        song.apply(JobResult(marks: [], stems: [:]), job: .structure, range: 0..<10)
+        #expect(song.marks[eventIndex].analysisStale == true)
+        #expect(!song.hasCompleted(.events, in: 4...6))
+        song.apply(JobResult(marks: [fresh]), job: .events, range: 4..<6)
+        #expect(song.marks.first { $0.id == fresh.id }?.analysisStale == false)
+        #expect(song.marks.first { $0.id == fresh.id }?.label == "人声已核对")
+        song.marks += [Mark(kind: "chord", start: 0, end: 10, source: "fixture", fields: ["label": ReviewedText(suggested: "C")]),
+                       Mark(kind: "key", start: 0, end: 10, source: "fixture", fields: ["label": ReviewedText(suggested: "C major")])]
+        song.key = "C major"
+        song.apply(JobResult(marks: []), job: .harmony, range: 4..<6)
+        #expect(song.hasCompleted(.harmony, in: 4...6) && !song.hasCompleted(.harmony, in: 0...10))
+        #expect(song.marks.filter { $0.kind == "chord" }.map(\.start).sorted() == [0, 6])
+        #expect(song.key == "C major" && song.marks.contains { $0.kind == "key" && $0.end == 10 })
+        song.marks += [Mark(kind: "emotion", start: 0, end: 1, source: "fixture", fields: ["label": ReviewedText(suggested: "紧张")]),
+                       Mark(kind: "emotion", start: 1, end: 10, source: "fixture", fields: ["label": ReviewedText(suggested: "平静")]),
+                       Mark(kind: "acoustic", start: 8, end: 10, source: "fixture", metrics: ["short_lufs": -10]),
+                       Mark(kind: "acoustic", start: 0, end: 2, source: "fixture", metrics: ["short_lufs": -20])]
+        let summary = song.summary(for: song.sections[0])
+        #expect(summary.contains("段尾响度上升") && summary.contains("主要听感 · 平静"))
+        let metrics = song.sectionMetrics(in: AnalysisRange(start: 0, end: 10))
+        #expect(metrics["mean_short_lufs"] == -15 && metrics["coverage_short_lufs"] == 0.4)
     }
 
     @Test func deletingSectionsPreservesCoverageAndCanBeUndone() throws {
@@ -85,7 +87,7 @@ struct MusicIntelligenceToolTests {
         let studio = Studio(root: root)
         try studio.open(#require(Bundle.main.url(forResource: "Study", withExtension: "wav")))
         let original = try #require(studio.song).sections
-        #expect(original.count == 3)
+        try #require(original.count == 3)
         let first = try #require(original.first)
         let middle = original[1]
         let last = try #require(original.last)
@@ -109,35 +111,4 @@ struct MusicIntelligenceToolTests {
         #expect(studio.song?.revision == revision)
     }
 
-    @Test func waveformAndEditorPersistHumanChanges() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at:root) }
-        let demo = try #require(Bundle.main.url(forResource:"Study",withExtension:"wav"))
-        let peaks = try Studio.waveform(demo)
-        #expect(peaks.count == 24000)
-        #expect(peaks.prefix(500).allSatisfy { $0 == 0 })
-        #expect(peaks.max() ?? 0 > 0.1)
-        let studio = Studio(root:root)
-        try studio.open(demo)
-        // An out-point can be marked first. Seeking to the other edge must keep it.
-        studio.seek(8)
-        studio.setPoint(.exit, at: studio.position)
-        #expect(studio.selection == nil)
-        studio.seek(2)
-        studio.setPoint(.entry, at: studio.position)
-        #expect(studio.selection == 2...8)
-        studio.add("note")
-        #expect(studio.row?.start == 2)
-        #expect(studio.row?.end == 8)
-        studio.undo()
-        #expect(studio.song?.marks.contains { $0.kind=="note" } == false)
-        studio.setPoint(.entry, at: 12)
-        #expect(studio.outPoint == nil)
-        studio.setPoint(.exit, at: 15)
-        #expect(studio.selection == 12...15)
-        let next = Studio(root:root)
-        try next.open(demo)
-        #expect(next.song?.revision == studio.song?.revision)
-        #expect(next.song?.marks == studio.song?.marks)
-    }
 }

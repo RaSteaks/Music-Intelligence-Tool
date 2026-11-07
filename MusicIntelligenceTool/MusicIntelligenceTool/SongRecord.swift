@@ -5,7 +5,10 @@ struct ReviewedText: Codable, Equatable {
     var suggested: String?
     var confirmed: String?
     var hint: String?
-    var value: String? { confirmed ?? suggested }
+    var origin: SuggestionOrigin?
+    var rejected: Bool?
+    var suggestionAvailable: Bool { rejected != true && origin?.stale != true }
+    var value: String? { confirmed ?? (suggestionAvailable ? suggested : nil) }
 }
 
 struct Mark: Codable, Identifiable, Equatable {
@@ -18,10 +21,18 @@ struct Mark: Codable, Identifiable, Equatable {
     var endConfirmed = false
     var fields: [String: ReviewedText] = [:]
     var metrics: [String: Double] = [:]
+    var analysisStale: Bool?
+    var relatedIDs: [String]?
 
-    var label: String { fields["label"]?.value ?? kind }
+    var label: String {
+        if let confirmed = fields["label"]?.confirmed { return confirmed }
+        if analysisStale == true { return "待更新的分析" }
+        if let value = fields["label"]?.value { return value }
+        if kind == "insight" { return fields["label"]?.origin?.stale == true ? "待更新的解读" : "已拒绝的解读" }
+        return kind
+    }
     var reviewed: Bool {
-        startConfirmed || endConfirmed || fields.values.contains { $0.confirmed != nil || $0.hint != nil }
+        startConfirmed || endConfirmed || fields.values.contains { $0.confirmed != nil || $0.hint != nil || $0.rejected == true }
     }
     func overlaps(_ range: Range<Double>) -> Bool {
         start == end ? range.contains(start) : start < range.upperBound && end > range.lowerBound
@@ -33,25 +44,34 @@ struct Mark: Codable, Identifiable, Equatable {
 }
 
 enum AnalysisJob: String, CaseIterable, Identifiable {
-    case structure, acoustics, harmony, lyrics, emotion, alignment
+    case structure, acoustics, rhythm, harmony, repetition, melody, lyrics, emotion, events, alignment
     var id: Self { self }
+    var requiresWholeTrack: Bool { self == .structure || self == .repetition }
     var title: String {
         switch self {
         case .structure: "结构 · 节拍 · 分轨"
         case .acoustics: "声学特征"
         case .harmony: "调性与和弦"
+        case .rhythm: "节奏与律动"
+        case .repetition: "重复结构与段落关系（全曲）"
+        case .melody: "主导旋律与音域"
         case .lyrics: "逐句歌词"
         case .emotion: "情绪标签与走势"
+        case .events: "声部活动与停顿"
         case .alignment: "歌词字词对齐"
         }
     }
     var kinds: Set<String> {
         switch self {
         case .structure: ["section", "beat", "downbeat"]
-        case .acoustics: ["acoustic", "onset"]
-        case .harmony: ["chord"]
+        case .acoustics: ["acoustic", "onset", "loudness"]
+        case .harmony: ["chord", "key", "key_region", "modulation"]
+        case .rhythm: ["rhythm_beat", "tempo", "rhythm_summary"]
+        case .repetition: ["repetition"]
+        case .melody: ["pitch", "melody_note", "melody_summary", "melody_phrase", "melody_motif"]
         case .lyrics: ["lyric", "word"]
         case .emotion: ["emotion"]
+        case .events: ["event"]
         case .alignment: ["word"]
         }
     }
@@ -62,6 +82,14 @@ struct JobResult: Codable {
     var bpm: Double?
     var key: String?
     var stems: [String: String]?
+    var warnings: [String]?
+    var coverage: [AnalysisCoverage]?
+}
+
+struct AnalysisCoverage: Codable, Equatable {
+    var source: String
+    var start: Double
+    var end: Double
 }
 
 struct SongRecord: Codable {
@@ -75,8 +103,22 @@ struct SongRecord: Codable {
     var bpm: Double?
     var key: String?
     var stems: [String: String] = [:]
+    var cloudRuns: [CloudRun]?
+    var cloudBatches: [CloudBatch]?
+    var warnings: [String: [String]]?
+    var coverage: [String: [AnalysisCoverage]]?
+    var completedRanges: [String: AnalysisRange]?
 
     var sections: [Mark] { marks.filter { $0.kind == "section" }.sorted { $0.start < $1.start } }
+
+    func hasCompleted(_ job: AnalysisJob, in range: ClosedRange<Double>) -> Bool {
+        guard ["完成", "无可靠结果"].contains(status[job.rawValue]) else { return false }
+        if let completed = completedRanges?[job.rawValue] {
+            return completed.start <= range.lowerBound && completed.end >= range.upperBound
+        }
+        // Older records only prove coverage for modules that always ran on the whole track.
+        return job.requiresWholeTrack
+    }
 
     init(url: URL, duration: Double) {
         path = url.standardizedFileURL.resolvingSymlinksInPath().path
@@ -155,43 +197,141 @@ struct SongRecord: Codable {
         let keepSections = sections.contains(where: \.reviewed)
         // A late result only owns its module and interval. Reviewed fields retain their originals.
         let existing = marks.filter { job.kinds.contains($0.kind) && $0.overlaps(range) }
+        let refreshable = [AnalysisJob.events, .rhythm, .harmony, .repetition, .melody].contains(job)
+        let oldRhythmBeats = marks.filter { $0.kind == "rhythm_beat" }.map(\.start)
+        // Constant interval candidates can retain their unanalysed portions.
+        // Whole-range summaries and phrases cannot be trimmed this way.
+        let splittable: Set<String> = ["event", "chord", "melody_note", "pitch", "tempo"]
+        let remaining = existing.filter { splittable.contains($0.kind) && !$0.reviewed }.flatMap { old -> [Mark] in
+            var pieces: [Mark] = []
+            if old.start < range.lowerBound { var left = old; left.end = range.lowerBound; pieces.append(left) }
+            if old.end > range.upperBound { var right = old; right.id = UUID().uuidString; right.start = range.upperBound; pieces.append(right) }
+            return pieces
+        }
         marks.removeAll { job.kinds.contains($0.kind) && $0.overlaps(range) && !$0.reviewed
-            && !(keepSections && $0.kind == "section") }
+            && !(keepSections && $0.kind == "section") && !(job == .harmony && !full && $0.kind == "key") }
+        marks += remaining
         for item in result.marks where item.start >= range.lowerBound && item.start < range.upperBound {
             var row = item
             row.end = min(row.end, range.upperBound)
+            if job == .harmony && !full && row.kind == "key" { row.kind = "key_region" }
             if row.kind == "section" && (keepSections || !full) { continue }
-            if existing.contains(where: { old in
+            if let old = existing.first(where: { old in
                 old.reviewed && old.kind == row.kind && old.start < row.end && old.end > row.start
-            }) { continue }
+                    && (row.kind != "event" || old.fields["event_type"]?.value == row.fields["event_type"]?.value)
+            }) {
+                if refreshable, old.source != "user", old.start == row.start, old.end == row.end, old.relatedIDs == row.relatedIDs,
+                   let index = marks.firstIndex(where: { $0.id == old.id }) {
+                    for (field, value) in row.fields {
+                        marks[index].fields[field, default: ReviewedText()].suggested = value.suggested
+                    }
+                    marks[index].metrics = row.metrics
+                    marks[index].source = row.source
+                    marks[index].analysisStale = false
+                    continue
+                }
+                // If refreshed boundaries differ, retain the reviewed old event
+                // and expose the fresh candidate separately for realignment.
+                if refreshable, old.source != "user", let index = marks.firstIndex(where: { $0.id == old.id }) {
+                    marks[index].analysisStale = true
+                } else { continue }
+            }
             marks.append(row)
         }
         if job == .structure && full {
             bpm = result.bpm
-            if let stems = result.stems { self.stems = stems }
+            if let stems = result.stems {
+                self.stems = stems
+                invalidateAnalysis(.events)
+                invalidateAnalysis(.melody)
+            }
+            for dependent in [AnalysisJob.rhythm, .harmony, .repetition] { invalidateAnalysis(dependent) }
             if sections.isEmpty {
                 marks.append(Mark(kind: "section", start: 0, end: duration, source: "initial"))
             }
         }
         if job == .harmony && full { key = result.key }
+        if job == .rhythm, !marks.contains(where: { $0.kind == "beat" }), oldRhythmBeats != marks.filter({ $0.kind == "rhythm_beat" }).map(\.start) {
+            invalidateAnalysis(.harmony)
+        }
+        if warnings == nil { warnings = [:] }
+        warnings?[job.rawValue] = result.warnings ?? []
+        if let measured = result.coverage {
+            let previous = coverage?[job.rawValue] ?? []
+            let retained = previous.flatMap { old -> [AnalysisCoverage] in
+                if old.end <= range.lowerBound || old.start >= range.upperBound { return [old] }
+                var parts: [AnalysisCoverage] = []
+                if old.start < range.lowerBound { parts.append(AnalysisCoverage(source: old.source, start: old.start, end: range.lowerBound)) }
+                if old.end > range.upperBound { parts.append(AnalysisCoverage(source: old.source, start: range.upperBound, end: old.end)) }
+                return parts
+            }
+            if coverage == nil { coverage = [:] }
+            coverage?[job.rawValue] = retained + measured
+        }
+        // Local requests may replace aggregates that span the selection. Adjacent
+        // local results cannot be used as proof of a completed whole-track run.
+        if completedRanges == nil { completedRanges = [:] }
+        completedRanges?[job.rawValue] = AnalysisRange(start: range.lowerBound, end: range.upperBound)
         status[job.rawValue] = result.marks.isEmpty ? "无可靠结果" : "完成"
     }
 
+    mutating func invalidateAnalysis(_ job: AnalysisJob, kinds: Set<String>? = nil) {
+        guard status[job.rawValue] != nil else { return }
+        status[job.rawValue] = "待更新"
+        completedRanges?.removeValue(forKey: job.rawValue)
+        if job == .harmony && (kinds == nil || kinds?.contains("key") == true) { key = nil }
+        for index in marks.indices where (kinds ?? job.kinds).contains(marks[index].kind) && marks[index].source != "user" {
+            marks[index].analysisStale = true
+        }
+        coverage?[job.rawValue] = []
+    }
+
     func summary(for section: Mark) -> String {
+        guard section.end > section.start else { return "" }
         let range = section.start..<section.end
-        let samples = marks.filter { $0.kind == "acoustic" && $0.overlaps(range) }
-        let levels = samples.compactMap { $0.metrics["short_lufs"] }
+        let third = (section.end - section.start) / 3
+        let beginning = section.start..<(section.start + third)
+        let ending = (section.end - third)..<section.end
         var parts: [String] = []
-        if let first = levels.first, let last = levels.last {
+        if let first = averageMetric("short_lufs", kind: "acoustic", range: beginning),
+           let last = averageMetric("short_lufs", kind: "acoustic", range: ending) {
             let delta = last - first
             parts.append(abs(delta) < 2 ? "响度较平稳" : delta > 0 ? "段尾响度上升" : "段尾响度减弱")
         }
-        let emotion = marks.first { $0.kind == "emotion" && $0.overlaps(range) }
-        if let mood = section.fields["mood"]?.value ?? emotion?.fields["label"]?.value, !mood.isEmpty {
-            parts.append("听感 · " + mood)
+        if let first = averageMetric("onsets_per_s", kind: "acoustic", range: beginning),
+           let last = averageMetric("onsets_per_s", kind: "acoustic", range: ending), abs(last - first) >= 1 {
+            parts.append(last > first ? "段尾起音更密集" : "段尾起音更稀疏")
+        }
+        var moods: [String: Double] = [:]
+        for row in marks where row.kind == "emotion" && row.overlaps(range) && (row.analysisStale != true || row.fields["label"]?.confirmed != nil) {
+            if let mood = row.fields["label"]?.value, !mood.isEmpty {
+                moods[mood, default: 0] += min(row.end, section.end) - max(row.start, section.start)
+            }
+        }
+        let dominant = moods.keys.sorted().max { moods[$0, default: 0] < moods[$1, default: 0] }
+        if let mood = section.fields["mood"]?.value ?? dominant, !mood.isEmpty {
+            parts.append("主要听感 · " + mood)
+        }
+        if let first = averageMetric("arousal", kind: "emotion", range: beginning),
+           let last = averageMetric("arousal", kind: "emotion", range: ending), abs(last - first) >= 1 {
+            parts.append(last > first ? "模型唤醒度上升" : "模型唤醒度下降")
         }
         if let note = section.fields["content"]?.value, !note.isEmpty { parts.append(note) }
         return parts.joined(separator: "，")
+    }
+
+    private func averageMetric(_ key: String, kind: String, range: Range<Double>) -> Double? {
+        var weighted = 0.0
+        var covered = 0.0
+        for row in marks where row.kind == kind && row.overlaps(range) && row.analysisStale != true {
+            guard let value = row.metrics[key] else { continue }
+            let overlap = min(row.end, range.upperBound) - max(row.start, range.lowerBound)
+            guard overlap > 0 else { continue }
+            weighted += value * overlap
+            covered += overlap
+        }
+        // Missing startup windows are unavailable data, never zero loudness.
+        return covered >= (range.upperBound - range.lowerBound) * 0.25 && covered > 0 ? weighted / covered : nil
     }
 
     func agentMessage(mcpEndpoint: String) throws -> String {
@@ -217,10 +357,14 @@ struct SongRecord: Codable {
         let dir = root.appendingPathComponent(trackID)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var next = self
+        next.reconcileCloudResults()
+        if next.cloudBatches != nil || next.coverage != nil || next.completedRanges != nil || next.cloudRuns?.contains(where: { $0.options != nil }) == true {
+            next.schemaVersion = max(next.schemaVersion, 3)
+        } else if next.cloudRuns != nil { next.schemaVersion = max(next.schemaVersion, 2) }
         next.revision += 1
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(next).write(to: dir.appendingPathComponent("analysis.json"), options: .atomic)
-        revision = next.revision
+        self = next
     }
 }

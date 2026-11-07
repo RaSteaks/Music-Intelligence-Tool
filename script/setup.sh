@@ -5,8 +5,15 @@ base=${PYTHON:-python3.10}
 modern=${PYTHON_MODERN:-python3.12}
 mode=${1:-base}
 command -v ffmpeg >/dev/null || { echo '请先安装 FFmpeg (brew install ffmpeg)' >&2; exit 1; }
-"$base" -m venv .venv
-.venv/bin/python -m pip install 'mcp>=1.12,<2' 'numpy<2' 'librosa==0.11.0' 'openai-whisper==20250625' 'torch==2.5.1'
+if [[ "$mode" != music ]]; then
+  "$base" -m venv .venv
+  .venv/bin/python -m pip install 'mcp>=1.12,<2' 'numpy<2' 'librosa==0.11.0' 'openai-whisper==20250625' 'torch==2.5.1'
+fi
+if [[ "$mode" == music || "$mode" == all ]]; then
+  # Essentia's native melody algorithms use their own NumPy ABI/runtime.
+  "$modern" -m venv .venv-music
+  .venv-music/bin/python -m pip install 'numpy==1.26.4' 'essentia==2.1b6.dev1389' 'soundfile==0.12.1'
+fi
 if [[ "$mode" == models || "$mode" == all ]]; then
   "$modern" -m venv .venv-structure
   .venv-structure/bin/python -m pip install all-in-one-mlx==1.0.14 'demucs-mlx[convert]>=1.4.11,<1.5'

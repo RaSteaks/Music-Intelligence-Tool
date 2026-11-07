@@ -6,11 +6,12 @@ enum AppPage: String {
 }
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case environment, service, shortcuts
+    case environment, externalModels, service, shortcuts
     var id: Self { self }
     var title: String {
         switch self {
         case .environment: "分析环境"
+        case .externalModels: "外部模型"
         case .service: "MCP 服务"
         case .shortcuts: "快捷键"
         }
@@ -18,6 +19,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .environment: "externaldrive"
+        case .externalModels: "sparkles"
         case .service: "network"
         case .shortcuts: "keyboard"
         }
@@ -40,6 +42,7 @@ struct SettingsPage: View {
             Group {
                 switch section {
                 case .environment: EnvironmentSettings(studio: studio)
+                case .externalModels: ExternalModelsSettings(models: studio.externalModels)
                 case .service: ServiceSettings(studio: studio)
                 case .shortcuts: ShortcutSettings()
                 }

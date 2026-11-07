@@ -45,6 +45,7 @@ enum Runtime {
 final class Studio {
     static let audioContentTypes = ["wav", "mp3", "flac", "m4a"].compactMap { UTType(filenameExtension: $0) }
     let modelEnvironment: ModelEnvironment
+    let externalModels: ExternalModels
     let root: URL
     var song: SongRecord?
     var selected: String?
@@ -84,6 +85,7 @@ final class Studio {
     var mcpEndpoint: String { "http://127.0.0.1:\(mcpPort)/mcp" }
     var activeJob: AnalysisJob?
     var cueJobs: [AnalysisJob] = []
+    private var skipCompletedJobs = false
     private var player: AVAudioPlayer?
     private var worker: Process?
     private var service: Process?
@@ -91,11 +93,16 @@ final class Studio {
     private var serviceInput: FileHandle?
     private var history: [(prior: [Mark], affected: Set<String>)] = []
     private var peakTask: Task<Void, Never>?
+    private var cloudTask: Task<Void, Never>?
+    var cloudProgress: String?
+    private(set) var completedComparisonID: String?
+    var cloudRunning: Bool { cloudTask != nil }
 
-    init(root: URL? = nil) {
+    init(root: URL? = nil, credentials: CloudCredentialStore = KeychainCredentials()) {
         let custom = ProcessInfo.processInfo.environment["MIT_LIBRARY"].map { URL(fileURLWithPath: $0) }
         self.root = root ?? custom ?? URL.applicationSupportDirectory.appendingPathComponent("MusicIntelligenceTool/Tracks")
         modelEnvironment = ModelEnvironment(cacheDirectory: self.root.appendingPathComponent(".environment"))
+        externalModels = ExternalModels(directory: self.root.appendingPathComponent(".external-models"), credentials: credentials)
     }
 
     var row: Mark? { song?.marks.first { $0.id == selected } }
@@ -134,20 +141,39 @@ final class Studio {
     func open(_ url: URL) throws {
         let path = url.standardizedFileURL.resolvingSymlinksInPath()
         if song?.path == path.path { return }
-        guard activeJob == nil else { throw StudioError.message("请等待当前分析或取消后切换歌曲。") }
+        guard activeJob == nil, !cloudRunning else { throw StudioError.message("请等待当前分析或取消后切换歌曲。") }
         let audio = try AVAudioPlayer(contentsOf: path)
         guard audio.duration > 0 else { throw StudioError.message("文件没有可播放的音频。") }
         var record = SongRecord(url: path, duration: audio.duration)
         let dir = root.appendingPathComponent(record.trackID)
         let file = dir.appendingPathComponent("analysis.json")
+        var needsSave = true
         if FileManager.default.fileExists(atPath: file.path) {
             record = try JSONDecoder().decode(SongRecord.self, from: Data(contentsOf: file))
+            let previousStatus = record.status
+            let previousCloudStatus = record.cloudRuns?.map(\.status)
+            let previousBatchStatus = record.cloudBatches?.map(\.status)
+            let previousMarks = record.marks
             for (key, state) in record.status where state == "分析中" { record.status[key] = "已中断" }
-        } else if path == Bundle.main.url(forResource: "Study", withExtension: "wav"),
+            for index in record.cloudRuns?.indices ?? 0..<0 {
+                if ["准备中", "分析中"].contains(record.cloudRuns?[index].status ?? "") {
+                    record.cloudRuns?[index].status = "已中断"
+                    record.cloudRuns?[index].message = "应用退出前的请求未确认完成；如已提交，可能仍产生费用。"
+                }
+            }
+            for index in record.cloudBatches?.indices ?? 0..<0 where record.cloudBatches?[index].status == "分析中" {
+                record.cloudBatches?[index].status = "已中断"
+                record.cloudBatches?[index].message = "批次已中断；已完成片段保留，重新运行可复用有效缓存。"
+            }
+            record.reconcileCloudResults()
+            needsSave = record.status != previousStatus || record.cloudRuns?.map(\.status) != previousCloudStatus || record.cloudBatches?.map(\.status) != previousBatchStatus || record.marks != previousMarks
+        } else if path == Bundle.main.url(forResource: "Study", withExtension: "wav")?.standardizedFileURL.resolvingSymlinksInPath(),
                   let example = Bundle.main.url(forResource: "Study", withExtension: "json") {
             record.marks = try JSONDecoder().decode(SongRecord.self, from: Data(contentsOf: example)).marks
         }
-        try record.save(in: root)
+        // Opening a saved record is read-only unless interrupted/stale analysis
+        // needs recovery. A new revision otherwise misrepresents a user edit.
+        if needsSave { try record.save(in: root) }
         player?.stop()
         player = audio
         song = record
@@ -155,6 +181,7 @@ final class Studio {
         // The agent can still read the previous snapshot, but it no longer owns this workspace's status.
         agentSendID = nil
         agentSendStatus = nil
+        completedComparisonID = nil
         selected = record.sections.first?.id
         playing = false
         stem = "原曲"
@@ -264,8 +291,11 @@ final class Studio {
         let previous = Dictionary(uniqueKeysWithValues: old.map { ($0.id, $0) })
         let updated = Dictionary(uniqueKeysWithValues: current.marks.map { ($0.id, $0) })
         let changed = Set(previous.keys).union(updated.keys).filter { previous[$0] != updated[$0] }
-        if old.filter({ $0.kind == "section" }).map(\.end) != current.sections.map(\.end),
-           current.status["emotion"] != nil { current.status["emotion"] = "待更新" }
+        if old.filter({ $0.kind == "section" }).map(\.end) != current.sections.map(\.end) {
+            current.invalidateAnalysis(.emotion)
+            current.invalidateAnalysis(.repetition)
+            current.invalidateAnalysis(.harmony, kinds: ["key_region", "modulation"])
+        }
         do {
             try current.save(in: root)
             history.append((old.filter { changed.contains($0.id) }, Set(changed)))
@@ -373,8 +403,9 @@ final class Studio {
         } catch { notice = error.localizedDescription }
     }
 
-    func run(_ jobs: [AnalysisJob], range: ClosedRange<Double>? = nil) {
+    func run(_ jobs: [AnalysisJob], range: ClosedRange<Double>? = nil, skipCompleted: Bool = false) {
         guard activeJob == nil, let song else { return }
+        skipCompletedJobs = skipCompleted
         cueJobs = jobs
         let interval = range ?? 0...song.duration
         launchNext(interval)
@@ -383,17 +414,29 @@ final class Studio {
     private func launchNext(_ interval: ClosedRange<Double>) {
         guard !cueJobs.isEmpty, var doc = song else { activeJob = nil; return }
         let job = cueJobs.removeFirst()
+        let bounds = job.requiresWholeTrack ? 0...doc.duration : interval
+        // MCP checks completion when a job reaches the front: a successful
+        // upstream job may invalidate it, while a failed upstream job should
+        // not force unrelated completed analyses to run again.
+        if skipCompletedJobs && doc.hasCompleted(job, in: bounds) {
+            launchNext(interval); return
+        }
         activeJob = job
         let dir = root.appendingPathComponent(doc.trackID)
         let runID = UUID().uuidString
         let out = dir.appendingPathComponent(runID+".json")
         let log = dir.appendingPathComponent(job.rawValue+".log")
-        let bounds = job == .structure ? 0...doc.duration : interval
         let sourceSections = doc.sections.map { [$0.start, $0.end] }
         let sourceLyrics = doc.marks.filter { $0.kind == "lyric" }
         do {
             guard bounds.upperBound > bounds.lowerBound else { throw StudioError.message("请选择有时长的区间。") }
-            let python = job == .emotion ? ".venv-emotion/bin/python" : job == .alignment ? ".venv-align/bin/python" : ".venv/bin/python"
+            let python: String
+            switch job {
+            case .emotion: python = ".venv-emotion/bin/python"
+            case .alignment: python = ".venv-align/bin/python"
+            case .melody: python = ".venv-music/bin/python"
+            default: python = ".venv/bin/python"
+            }
             let p = try Runtime.process("analysis_worker", args: [job.rawValue, dir.appendingPathComponent("analysis.json").path,
                 out.path, Runtime.root.path, String(bounds.lowerBound), String(bounds.upperBound)], python: python)
             try Data().write(to: log)
@@ -417,8 +460,8 @@ final class Studio {
                             current.status[job.rawValue] = "待更新"
                         } else {
                             current.apply(result, job: job, range: bounds.lowerBound..<bounds.upperBound)
-                            if job == .emotion && sourceSections != current.sections.map({ [$0.start, $0.end] }) {
-                                current.status[job.rawValue] = "待更新"
+                            if [.emotion, .repetition, .harmony].contains(job) && sourceSections != current.sections.map({ [$0.start, $0.end] }) {
+                                current.invalidateAnalysis(job)
                             }
                         }
                     } catch { current.status[job.rawValue] = "失败 · " + error.localizedDescription }
@@ -440,6 +483,292 @@ final class Studio {
     private func persist(_ doc: SongRecord) {
         var updated = doc
         do { try updated.save(in: root); song = updated } catch { notice = error.localizedDescription }
+    }
+
+    func startCloud(connectionID: String, task: CloudTaskKind, range: AnalysisRange, force: Bool = false,
+                    options supplied: CloudTaskOptions? = nil) {
+        guard !cloudRunning, let snapshot = song,
+              let connection = externalModels.configuration.connections.first(where: { $0.id == connectionID }) else { return }
+        let options = supplied ?? CloudTaskOptions(audioSources: task == .audio ? [.original] : [])
+        do {
+            try options.validate(task: task, range: range, duration: snapshot.duration)
+            if !options.audioSources.isEmpty && !connection.audioAvailable {
+                throw CloudError.configuration("此模型的音频能力未知，请先在外部模型设置中运行音频能力测试。")
+            }
+            let key = try externalModels.key(for: connection)
+            cloudProgress = "准备分析输入…"
+            cloudTask = Task {
+                defer { cloudTask = nil; cloudProgress = nil }
+                do { _ = try await performCloud(snapshot: snapshot, connection: connection, key: key, task: task,
+                                                range: range, options: options, force: force) }
+                catch { if !Task.isCancelled { notice = error.localizedDescription } }
+            }
+        } catch { notice = error.localizedDescription }
+    }
+
+    func startCloudBatch(connectionID: String, summaryConnectionID: String, plan: CloudBatchPlan, force: Bool = false) {
+        guard !cloudRunning, let snapshot = song,
+              let connection = externalModels.configuration.connections.first(where: { $0.id == connectionID }),
+              let summaryConnection = externalModels.configuration.connections.first(where: { $0.id == summaryConnectionID }) else { return }
+        do {
+            try connection.validate(); try summaryConnection.validate()
+            guard !plan.ranges.isEmpty, plan.requestCount <= plan.maximumRequests, (2...50).contains(plan.maximumRequests),
+                  plan.ranges.first?.start == 0, plan.ranges.last?.end == snapshot.duration,
+                  zip(plan.ranges, plan.ranges.dropFirst()).allSatisfy({ pair in pair.0.end == pair.1.start }) else {
+                throw CloudError.configuration("整曲计划不完整或超过请求上限，请重新预览。")
+            }
+            for range in plan.ranges {
+                try CloudTaskOptions(audioSources: plan.audioSources).validate(task: plan.audioSources.isEmpty ? .interpretation : .audio,
+                                                                             range: range, duration: snapshot.duration)
+            }
+            if !plan.audioSources.isEmpty && !connection.audioAvailable { throw CloudError.configuration("分段模型的音频能力尚未验证。") }
+            // Capture both credentials with the reviewed connection snapshots.
+            // Editing a connection during a batch must not retarget later calls.
+            let key = try externalModels.key(for: connection)
+            let summaryKey = try externalModels.key(for: summaryConnection)
+            let batch = CloudBatch(ranges: plan.ranges, audioSources: plan.audioSources, maximumRequests: plan.maximumRequests)
+            try updateCloudRecord { record in
+                if record.cloudBatches == nil { record.cloudBatches = [] }
+                record.cloudBatches?.append(batch)
+            }
+            cloudProgress = "准备整曲分析…"
+            cloudTask = Task {
+                defer { cloudTask = nil; cloudProgress = nil }
+                do {
+                    var completedRuns: [String] = []
+                    for (index, range) in plan.ranges.enumerated() {
+                        try Task.checkCancellation()
+                        let options = CloudTaskOptions(audioSources: plan.audioSources)
+                        guard let current = song,
+                              try current.cloudInputFingerprint(in: range, options: options) == snapshot.cloudInputFingerprint(in: range, options: options) else {
+                            throw CloudError.configuration("待分析片段的输入已变化，已停止批次。已完成结果保留，请重新预览后运行。")
+                        }
+                        let id = try await performCloud(snapshot: snapshot, connection: connection, key: key,
+                                                        task: plan.audioSources.isEmpty ? .interpretation : .audio,
+                                                        range: range, options: options, force: force, batchID: batch.id,
+                                                        progressPrefix: "片段 \(index + 1)/\(plan.ranges.count) · ")
+                        completedRuns.append(id)
+                        guard song?.hasCurrentCloudRuns(completedRuns) == true else {
+                            throw CloudError.configuration("分析期间输入发生变化，已保留候选并停止后续请求。")
+                        }
+                    }
+                    guard let current = song else { throw CloudError.configuration("歌曲已关闭。") }
+                    let range = AnalysisRange(start: 0, end: current.duration)
+                    let completed = Set(completedRuns)
+                    let ids = current.marks.filter { row in
+                        guard let origin = row.fields["label"]?.origin else { return false }
+                        return completed.contains(origin.runID) && origin.stale == false
+                    }.map(\.id).sorted()
+                    let options = CloudTaskOptions(inputInsightIDs: ids, compactContext: true,
+                                                   missingRanges: current.unanalyzedRanges(in: range, runIDs: completed))
+                    let id = try await performCloud(snapshot: current, connection: summaryConnection, key: summaryKey,
+                                                    task: .overview, range: range, options: options, force: force,
+                                                    batchID: batch.id, progressPrefix: "整曲汇总 · ")
+                    try updateCloudRecord { record in
+                        if let index = record.cloudBatches?.firstIndex(where: { $0.id == batch.id }) {
+                            record.cloudBatches?[index].summaryRunID = id
+                            record.cloudBatches?[index].status = record.cloudRuns?.first(where: { $0.id == id })?.status == "待更新" ? "待更新" : "完成"
+                        }
+                    }
+                } catch {
+                    do {
+                        try updateCloudRecord { record in
+                            if let index = record.cloudBatches?.firstIndex(where: { $0.id == batch.id }) {
+                                let ids = Set(record.cloudBatches?[index].runIDs ?? [])
+                                let success = record.cloudRuns?.contains { ids.contains($0.id) && ["完成", "无可靠结果"].contains($0.status) } == true
+                                record.cloudBatches?[index].status = Task.isCancelled ? "已取消" : success ? "部分完成" : "失败"
+                                record.cloudBatches?[index].message = "已停止后续请求，保留已完成片段；重新运行可复用有效缓存。" + error.localizedDescription
+                            }
+                        }
+                    } catch { notice = "批次状态保存失败：" + error.localizedDescription; return }
+                    if !Task.isCancelled { notice = error.localizedDescription }
+                }
+            }
+        } catch { notice = error.localizedDescription }
+    }
+
+    func compareModels(connectionIDs: [String], task: CloudTaskKind, range: AnalysisRange, options: CloudTaskOptions, force: Bool = false) {
+        guard !cloudRunning, let snapshot = song else { return }
+        do {
+            try options.validate(task: task, range: range, duration: snapshot.duration)
+            let connections = connectionIDs.compactMap { id in externalModels.configuration.connections.first { $0.id == id } }
+            guard connections.count == 2, connections[0].validationSignature != connections[1].validationSignature else {
+                throw CloudError.configuration("请选择两个不同模型或渠道的连接。")
+            }
+            for connection in connections {
+                try connection.validate()
+                if !options.audioSources.isEmpty && !connection.audioAvailable { throw CloudError.configuration("两个连接都需要支持所选音频输入。") }
+                if range.duration * Double(options.audioSources.count) > connection.maxAudioSeconds { throw CloudError.configuration("音频合计时长超过其中一个连接的限制。") }
+            }
+            let keys = try connections.map { try externalModels.key(for: $0) }
+            let fingerprint = try snapshot.cloudInputFingerprint(in: range, options: options)
+            var batch = CloudBatch(ranges: [range, range], audioSources: options.audioSources, maximumRequests: 2)
+            batch.mode = "models"
+            try updateCloudRecord { record in
+                if record.cloudBatches == nil { record.cloudBatches = [] }
+                record.cloudBatches?.append(batch)
+            }
+            cloudProgress = "准备同一输入的双模型对照…"
+            cloudTask = Task {
+                defer { cloudTask = nil; cloudProgress = nil }
+                var successes = 0
+                var failures: [String] = []
+                for index in connections.indices {
+                    if Task.isCancelled { break }
+                    do {
+                        guard let current = song, try current.cloudInputFingerprint(in: range, options: options) == fingerprint else {
+                            throw CloudError.configuration("输入已变化，当前对照需要重新运行。")
+                        }
+                        _ = try await performCloud(snapshot: snapshot, connection: connections[index], key: keys[index], task: task,
+                                                   range: range, options: options, force: force, batchID: batch.id,
+                                                   progressPrefix: "模型 \(index+1)/2 · ")
+                        successes += 1
+                    } catch { failures.append(connections[index].name + "：" + error.localizedDescription) }
+                }
+                do {
+                    try updateCloudRecord { record in
+                        if let index = record.cloudBatches?.firstIndex(where: { $0.id == batch.id }) {
+                            let ids = Set(record.cloudBatches?[index].runIDs ?? [])
+                            let stale = record.cloudRuns?.contains { ids.contains($0.id) && $0.status == "待更新" } == true
+                            record.cloudBatches?[index].status = Task.isCancelled ? "已取消" : stale ? "待更新" : successes == 2 ? "完成" : successes == 1 ? "部分完成" : "失败"
+                            record.cloudBatches?[index].message = failures.isEmpty ? "同一输入独立分析；未调用第三个模型裁判，也不将多数意见视为事实。" : failures.joined(separator: "\n")
+                        }
+                    }
+                    completedComparisonID = batch.id
+                } catch { notice = error.localizedDescription }
+            }
+        } catch { notice = error.localizedDescription }
+    }
+
+    private func performCloud(snapshot: SongRecord, connection: ModelConnection, key: String, task: CloudTaskKind,
+                              range: AnalysisRange, options: CloudTaskOptions, force: Bool,
+                              batchID: String? = nil, progressPrefix: String = "") async throws -> String {
+        var runID: String?
+        var submitted = false
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MIT-cloud-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            try Task.checkCancellation()
+            let context = snapshot.cloudContext(in: range, options: options)
+            let fingerprint = try snapshot.cloudInputFingerprint(in: range, options: options)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            var run = CloudRun(task: task, provider: connection.provider.rawValue, model: connection.model,
+                               range: range, inputRevision: snapshot.revision, inputFingerprint: fingerprint)
+            run.context = context; run.options = options; run.batchID = batchID
+            run.promptVersion = "music-insights-v2"
+            run.endpointHost = try connection.endpoint(connection.apiStyle.path).host
+            runID = run.id
+            try updateCloudRecord { record in
+                if record.cloudRuns == nil { record.cloudRuns = [] }
+                record.cloudRuns?.append(run)
+                if let batchID, let index = record.cloudBatches?.firstIndex(where: { $0.id == batchID }) {
+                    record.cloudBatches?[index].runIDs.append(run.id)
+                }
+            }
+            guard range.duration * Double(options.audioSources.count) <= connection.maxAudioSeconds else {
+                throw CloudError.configuration("所选音轨合计时长超过此连接上限，请缩小选区或减少音轨。")
+            }
+            var attachments: [CloudAudioAttachment] = []
+            for reference in context.audioReferences ?? [] {
+                cloudProgress = progressPrefix + "裁切" + reference.source.title + "…"
+                let path: String
+                if reference.source == .original { path = snapshot.path }
+                else if let stem = snapshot.stems[reference.source.rawValue] { path = stem }
+                else { throw CloudError.configuration("缺少\(reference.source.title)，请先运行分轨分析。") }
+                let audio = try await CloudAudio.prepare(source: URL(fileURLWithPath: path), range: range, directory: directory)
+                attachments.append(CloudAudioAttachment(reference: reference, data: audio))
+            }
+            try Task.checkCancellation()
+            if let batchID, let current = song, let batch = current.cloudBatches?.first(where: { $0.id == batchID }), batch.mode != "models" {
+                // Cutting audio can suspend the task while the user edits a
+                // previously completed segment. Check again before sending.
+                guard current.hasCurrentCloudRuns(batch.runIDs.filter { $0 != run.id }),
+                      try current.cloudInputFingerprint(in: range, options: options) == fingerprint else {
+                    throw CloudError.configuration("批次输入已变化，已停止后续请求。")
+                }
+            }
+            if !attachments.isEmpty {
+                run.audioFingerprint = SongRecord.digest(Data(attachments.map { $0.reference.id + ":" + SongRecord.digest($0.data) }.joined(separator: "|").utf8))
+            }
+            let cacheKey = [connection.validationSignature, String(connection.maxOutputTokens), task.rawValue,
+                            fingerprint, run.audioFingerprint ?? "", run.promptVersion].joined(separator: "|")
+            run.requestFingerprint = SongRecord.digest(Data(cacheKey.utf8))
+            if !force, let cached = song?.cloudRuns?.last(where: {
+                $0.id != run.id && $0.requestFingerprint == run.requestFingerprint && $0.hasCurrentResult
+            }) {
+                try updateCloudRecord { record in
+                    record.cloudRuns?.removeAll { $0.id == run.id }
+                    if let batchID, let index = record.cloudBatches?.firstIndex(where: { $0.id == batchID }) {
+                        record.cloudBatches?[index].runIDs.removeAll { $0 == run.id }
+                        record.cloudBatches?[index].runIDs.append(cached.id)
+                    }
+                }
+                selected = song?.marks.first { $0.fields["label"]?.origin?.runID == cached.id }?.id
+                if batchID == nil { notice = "已复用相同输入的有效分析；未再次发送请求。需要新的结果时启用“重新调用模型”。" }
+                return cached.id
+            }
+            cloudProgress = progressPrefix + (attachments.isEmpty ? "正在解读分析结果…" : "正在上传并分析音频…")
+            let client = CloudClient()
+            let request = try client.makeRequest(connection: connection, key: key, context: context, task: task, attachments: attachments)
+            run.status = "分析中"
+            try updateCloudRecord { record in
+                if let batchID, let index = record.cloudBatches?.firstIndex(where: { $0.id == batchID }), var batch = record.cloudBatches?[index] {
+                    guard batch.submittedRequests < batch.maximumRequests else {
+                        throw CloudError.configuration("本批次已达到请求上限。")
+                    }
+                    batch.submittedRequests += 1
+                    record.cloudBatches?[index] = batch
+                }
+                if let index = record.cloudRuns?.firstIndex(where: { $0.id == run.id }) { record.cloudRuns?[index] = run }
+            }
+            submitted = true
+            let response = try await client.complete(request, style: connection.apiStyle, context: context, task: task)
+            try Task.checkCancellation()
+            cloudProgress = progressPrefix + "校验并保存建议…"
+            try updateCloudRecord { record in
+                if let index = record.cloudRuns?.firstIndex(where: { $0.id == run.id }) {
+                    record.cloudRuns?[index].actualModel = response.model
+                    record.cloudRuns?[index].upstreamProvider = response.provider
+                    record.cloudRuns?[index].usage = response.usage
+                }
+                try record.applyCloud(response.answer, runID: run.id)
+            }
+            selected = song?.marks.first { $0.fields["label"]?.origin?.runID == run.id }?.id ?? selected
+            visibleKinds.insert("insight")
+            return run.id
+        } catch {
+            let cancelled = Task.isCancelled || error is CancellationError
+            let message = cancelled ? "已取消。已经提交的远端请求可能仍产生费用。" : error.localizedDescription
+            if let runID {
+                try updateCloudRecord { record in
+                    if let index = record.cloudRuns?.firstIndex(where: { $0.id == runID }) {
+                        let uncertain = submitted && (error as? CloudError)?.requestMayStillBeRunning == true
+                        record.cloudRuns?[index].status = cancelled ? "已取消" : uncertain ? "结果未确认" : "失败"
+                        record.cloudRuns?[index].message = message
+                        record.cloudRuns?[index].finishedAt = Date()
+                        if let failure = error as? CloudError,
+                           case .rejectedResponse(_, let model, let provider, let usage) = failure {
+                            record.cloudRuns?[index].actualModel = model
+                            record.cloudRuns?[index].upstreamProvider = provider
+                            record.cloudRuns?[index].usage = usage
+                        }
+                    }
+                }
+            }
+            throw error
+        }
+    }
+
+    private func updateCloudRecord(_ update: (inout SongRecord) throws -> Void) throws {
+        guard var record = song else { throw CloudError.configuration("歌曲已关闭。") }
+        try update(&record)
+        try record.save(in: root)
+        song = record
+    }
+
+    func cancelCloud() {
+        cloudTask?.cancel()
+        if cloudTask != nil { cloudProgress = "正在取消…" }
     }
     func cancel() {
         cueJobs = []
@@ -498,15 +827,14 @@ final class Studio {
             guard let path = request["path"] else { throw StudioError.message("缺少音频路径") }
             try open(URL(fileURLWithPath: path))
             guard let doc = song else { throw StudioError.message("歌曲未打开") }
-            let pending = Self.defaultJobs.filter { !["完成", "无可靠结果"].contains(doc.status[$0.rawValue]) }
-            if !pending.isEmpty { run(pending) }
+            run(Self.defaultJobs, skipCompleted: true)
             response = ["track_id": doc.trackID, "status": activeJob == nil ? "ready" : "running"]
         } catch { response = ["error": error.localizedDescription] }
         if let data = try? JSONEncoder().encode(response) {
             try? serviceInput?.write(contentsOf: data + Data([10]))
         }
     }
-    static let defaultJobs: [AnalysisJob] = [.acoustics, .harmony, .structure, .lyrics, .emotion]
+    static let defaultJobs: [AnalysisJob] = [.acoustics, .structure, .rhythm, .harmony, .repetition, .events, .melody, .lyrics, .emotion]
     func chooseRuntime() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -539,5 +867,5 @@ final class Studio {
         try? serviceInput?.close()
         if p?.isRunning == true { p?.terminate() }
     }
-    func stop() { cancel(); stopService(); modelEnvironment.cancel(); player?.stop() }
+    func stop() { cancel(); cancelCloud(); stopService(); modelEnvironment.cancel(); player?.stop() }
 }

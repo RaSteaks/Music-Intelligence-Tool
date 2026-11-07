@@ -75,6 +75,8 @@ final class WaveCanvas: NSView {
     }
     private let amber = NSColor(srgbRed: 0.96, green: 0.70, blue: 0.36, alpha: 1)
     private let aqua = NSColor(srgbRed: 0.40, green: 0.80, blue: 0.76, alpha: 1)
+    private var summaryRevision: (track: String, revision: Int)?
+    private var sectionSummaries: [String: String] = [:]
     private func x(_ time: Double) -> CGFloat {
         guard let i = input else { return 0 }
         return (time-i.window.lowerBound)/max(0.001, i.window.upperBound-i.window.lowerBound)*bounds.width
@@ -83,7 +85,8 @@ final class WaveCanvas: NSView {
         guard let i = input else { return 0 }
         let span = i.window.upperBound-i.window.lowerBound
         let t = i.window.lowerBound + min(1, max(0, x/max(1, bounds.width))) * span
-        if snap && i.snap, let beat = i.record.marks.filter({ $0.kind == "beat" && abs($0.start-t) < 7*span/bounds.width })
+        let kind = i.record.marks.contains { $0.kind == "beat" && $0.analysisStale != true } ? "beat" : "rhythm_beat"
+        if snap && i.snap, let beat = i.record.marks.filter({ $0.kind == kind && $0.analysisStale != true && abs($0.start-t) < 7*span/bounds.width })
             .min(by: { abs($0.start-t) < abs($1.start-t) }) { return beat.start }
         return t
     }
@@ -144,6 +147,12 @@ final class WaveCanvas: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let i = input, bounds.width > 0 else { return }
+        // Playback redraws the cursor frequently; pitch frames must not force
+        // every section aggregate to be recomputed on each display update.
+        if summaryRevision?.track != i.record.trackID || summaryRevision?.revision != i.record.revision {
+            sectionSummaries = Dictionary(uniqueKeysWithValues: i.record.sections.map { ($0.id, i.record.summary(for: $0)) })
+            summaryRevision = (i.record.trackID, i.record.revision)
+        }
         NSColor(srgbRed: 0.073, green: 0.107, blue: 0.124, alpha: 1).setFill()
         bounds.fill()
         hits = []
@@ -161,7 +170,7 @@ final class WaveCanvas: NSView {
             color.withAlphaComponent(0.15).setFill(); frame.insetBy(dx: 1,dy: 0).fill()
             let inner = frame.intersection(bounds).insetBy(dx: 6,dy: 3)
             label(row.label, inner, color, size: 12)
-            label(i.record.summary(for: row), NSRect(x: inner.minX,y: 49,width: inner.width,height: 15), .lightGray)
+            label(sectionSummaries[row.id] ?? "", NSRect(x: inner.minX,y: 49,width: inner.width,height: 15), .lightGray)
             hits.append((frame,row))
         }
         let mid = bounds.height * 0.48
@@ -179,17 +188,36 @@ final class WaveCanvas: NSView {
             }
         }
         aqua.setStroke(); path.stroke()
-        let rows = i.record.marks.filter { i.visible.contains($0.kind) && x($0.end) >= 0 && x($0.start) <= bounds.width }
+        let rows = i.record.marks.filter { row in
+            let semanticEvent = row.kind == "insight" && row.fields["category"]?.value == "event" && row.id == i.selected
+            return (row.analysisStale != true || row.reviewed) && (i.visible.contains(row.kind) || (i.visible.contains("event") && semanticEvent) || (row.kind == "rhythm_beat" && i.visible.contains("beat"))) && x(row.end) >= 0 && x(row.start) <= bounds.width
+        }
+        let ordinary = ["lyric","word","note","chord","emotion","insight","tempo","repetition"].filter {
+            i.visible.contains($0) || ($0 == "insight" && rows.contains { $0.kind == "insight" })
+        }
+        let eventTypes = Set(i.record.marks.filter { $0.kind == "event" }.compactMap { $0.fields["event_type"]?.value })
+        let events = i.visible.contains("event") ? ["silence", "vocals", "drums", "bass"].filter { eventTypes.contains($0) }.map { "event:" + $0 } : []
+        let intervalKinds = ordinary + events
+        let pitches = rows.filter { $0.kind == "pitch" && $0.analysisStale != true }.compactMap { $0.metrics["midi_pitch"] }
+        let pitchLow = floor(pitches.min() ?? 48)
+        let pitchHigh = max(pitchLow + 12, ceil(pitches.max() ?? 84))
+        if !pitches.isEmpty { label("旋律候选 · MIDI \(Int(pitchLow))–\(Int(pitchHigh))", NSRect(x: 8, y: 65, width: 220, height: 16), aqua) }
         for row in rows {
+            // Semantic findings often share an interval. Show the selected
+            // finding's range; the list exposes every candidate without overlap.
+            if row.kind == "insight" && row.id != i.selected { continue }
             let xx = x(row.start)
-            if ["beat","downbeat","onset"].contains(row.kind) {
+            if ["beat","downbeat","onset","rhythm_beat"].contains(row.kind) {
                 let color: NSColor = row.kind == "downbeat" ? amber : .white.withAlphaComponent(0.23)
                 line(.init(x: xx,y: mid+height),.init(x: xx,y: mid+height-(row.kind == "downbeat" ? 32 : 12)),color)
-            } else if ["lyric","word","note","chord","emotion"].contains(row.kind) {
-                let kinds = ["lyric","word","note","chord","emotion"].filter { i.visible.contains($0) }
-                let dy = CGFloat(kinds.firstIndex(of: row.kind) ?? 0)*21
+            } else if row.kind == "pitch", row.analysisStale != true, let pitch = row.metrics["midi_pitch"] {
+                let y = mid + height - (pitch - pitchLow)/(pitchHigh - pitchLow)*height*2
+                line(.init(x: xx, y: y), .init(x: x(row.end), y: y), aqua)
+            } else if ["lyric","word","note","chord","emotion","insight","event","tempo","repetition"].contains(row.kind) {
+                let lane = row.kind == "event" ? "event:" + (row.fields["event_type"]?.value ?? "silence") : row.kind
+                let dy = CGFloat(intervalKinds.firstIndex(of: lane) ?? 0)*21
                 let width = max(row.kind == "note" && row.start == row.end ? 70 : 7, x(row.end)-xx)
-                let box = NSRect(x: xx,y: bounds.height-22*CGFloat(kinds.count)+dy,width: width,height: 19)
+                let box = NSRect(x: xx,y: bounds.height-22*CGFloat(intervalKinds.count)+dy,width: width,height: 19)
                 let tint = row.id == i.selected ? amber : aqua
                 tint.withAlphaComponent(0.15).setFill(); box.fill()
                 label(row.label, box.insetBy(dx: 3,dy: 2), tint)

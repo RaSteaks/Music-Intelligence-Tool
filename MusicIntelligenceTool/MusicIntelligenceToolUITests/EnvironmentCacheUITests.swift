@@ -11,6 +11,8 @@ final class EnvironmentCacheUITests: XCTestCase {
         let directory = files.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try files.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? files.removeItem(at: directory) }
+        // Keep MCP genuinely idle while the initial environment check completes.
+        try files.createSymbolicLink(at: directory.appendingPathComponent(".venv"), withDestinationURL: base)
         let app = XCUIApplication()
         app.launchEnvironment["MIT_LIBRARY"] = directory.appendingPathComponent("library").path
         app.launchEnvironment["MIT_RUNTIME"] = directory.path
@@ -20,7 +22,7 @@ final class EnvironmentCacheUITests: XCTestCase {
         app.launch()
         defer { app.terminate() }
         openEnvironment(app)
-        let original = app.staticTexts["未找到 .venv/bin/python"].firstMatch
+        let original = app.staticTexts["声学分析、和声与 MCP 依赖已安装"].firstMatch
         XCTAssertTrue(original.waitForExistence(timeout: 10))
         let recheck = app.buttons["重新检查"]
         let idle = NSPredicate { _, _ in recheck.exists && recheck.isEnabled }
@@ -30,8 +32,16 @@ final class EnvironmentCacheUITests: XCTestCase {
         let savedCheck = savedDirectory.appendingPathComponent("check.json")
         let originalData = try Data(contentsOf: savedCheck)
 
-        // Make the real base environment available after the first check, without downloading any models.
-        try files.createSymbolicLink(at: directory.appendingPathComponent(".venv"), withDestinationURL: base)
+        let log = directory.appendingPathComponent("library/mcp.log")
+        let listening = NSPredicate { _, _ in
+            (try? String(contentsOf: log, encoding: .utf8).contains("Uvicorn running on")) == true
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: listening, object: nil)], timeout: 10), .completed)
+        XCTAssertTrue(app.staticTexts["未找到 .venv-structure/bin/python"].firstMatch.exists)
+        let size = Int64(145_262_807).formatted(.byteCount(style: .decimal))
+        XCTAssertTrue(app.staticTexts["base.pt · \(size)"].waitForExistence(timeout: 10))
+        // Removing the fixture interpreter must not silently invalidate cached results.
+        try files.removeItem(at: directory.appendingPathComponent(".venv"))
         app.staticTexts["MCP 服务"].firstMatch.click()
         app.staticTexts["分析环境"].firstMatch.click()
         XCTAssertTrue(original.waitForExistence(timeout: 5))
@@ -47,7 +57,7 @@ final class EnvironmentCacheUITests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: savedCheck), originalData)
 
         recheck.click()
-        XCTAssertTrue(app.staticTexts["声学分析、和声与 MCP 依赖已安装"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["未找到 .venv/bin/python"].firstMatch.waitForExistence(timeout: 10))
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: idle, object: nil)], timeout: 20), .completed)
         XCTAssertNotEqual(try Data(contentsOf: savedCheck), originalData)
         app.scrollViews.containing(.button, identifier: "重新检查").firstMatch.scroll(byDeltaX: 0, deltaY: -800)

@@ -58,7 +58,7 @@ struct EnvironmentSettings: View {
                         } else if let report = models.reports[feature] {
                             switch report.state {
                             case .ready:
-                                Label(feature == .base ? "已安装" : "已缓存", systemImage: "checkmark.circle.fill")
+                                Label(feature == .base || feature == .melody ? "已安装" : "已缓存", systemImage: "checkmark.circle.fill")
                                     .font(.caption).foregroundStyle(.teal)
                             case .missing:
                                 Button(report.action ?? "下载模型") { models.download(feature) }

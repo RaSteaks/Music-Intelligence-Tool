@@ -1,7 +1,7 @@
 import XCTest
 
-final class TimelineInteractionUITests: XCTestCase {
-    @MainActor func testRulerScrubbingAndContinuousOutPoints() throws {
+final class WorkspaceUITests: XCTestCase {
+    @MainActor func testScrubSelectEditAndReopen() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let app = XCUIApplication()
@@ -31,8 +31,17 @@ final class TimelineInteractionUITests: XCTestCase {
         XCTAssertEqual(seconds, 24, accuracy: 0.1)
         app.typeKey("o", modifierFlags: [])
         XCTAssertEqual(points.value as? String, "入 \(firstExit)   出 \(secondTime)")
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "时间尺定位与连续出点"; screenshot.lifetime = .keepAlways
+        let end = app.textFields["rangeEnd"]
+        XCTAssertTrue(end.waitForExistence(timeout: 5))
+        end.click(); end.typeKey("a", modifierFlags: .command); end.typeText("11.50")
+        app.buttons["applyRange"].click()
+        XCTAssertTrue(app.staticTexts["00:11.50"].firstMatch.waitForExistence(timeout: 5))
+        app.terminate(); app.launch()
+        app.buttons["openStudy"].click()
+        XCTAssertTrue(end.waitForExistence(timeout: 10))
+        XCTAssertEqual(end.value as? String, "11.500")
+        let screenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        screenshot.name = "定位、分段校对与重新打开"; screenshot.lifetime = .keepAlways
         add(screenshot)
     }
 }

@@ -4,13 +4,14 @@ import Foundation
 import Observation
 
 enum ModelFeature: String, Codable, CaseIterable, Identifiable {
-    case base, structure, stems, lyrics, chinese = "align-zh", english = "align-en", emotion
+    case base, structure, stems, melody, lyrics, chinese = "align-zh", english = "align-en", emotion
     var id: Self { self }
     var title: String {
         switch self {
         case .base: "声学、和声与 MCP"
         case .structure: "结构、节拍与小节第一拍"
         case .stems: "声部分离"
+        case .melody: "主导旋律与音域"
         case .lyrics: "歌词转录"
         case .chinese: "中文字词对齐"
         case .english: "英文字词对齐"
@@ -23,6 +24,7 @@ enum ModelFeature: String, Codable, CaseIterable, Identifiable {
         case .structure, .stems: ".venv-structure"
         case .chinese, .english: ".venv-align"
         case .emotion: ".venv-emotion"
+        case .melody: ".venv-music"
         }
     }
     var setupCommand: String {
@@ -30,6 +32,7 @@ enum ModelFeature: String, Codable, CaseIterable, Identifiable {
         case .base, .lyrics: "./script/setup.sh"
         case .structure, .stems, .emotion: "./script/setup.sh models"
         case .chinese, .english: "./script/setup.sh align"
+        case .melody: "./script/setup.sh music"
         }
     }
 }
@@ -91,6 +94,10 @@ final class ModelEnvironment {
         }
         // A completed check has no expiry: page navigation must not launch model processes again.
         if checkedAt == nil { refresh() }
+        else {
+            let missing = ModelFeature.allCases.filter { reports[$0] == nil }
+            if !missing.isEmpty { start(missing, download: false) }
+        }
     }
 
     func refresh() {

@@ -5,6 +5,10 @@ check_dir="${MIT_CHECK_DIR:-$PWD/tmp/agent-handoff-checks}"
 mkdir -p "$check_dir"
 xcrun swiftc -parse-as-library -swift-version 5 \
   MusicIntelligenceTool/MusicIntelligenceTool/SongRecord.swift \
+  MusicIntelligenceTool/MusicIntelligenceTool/CloudRecord.swift \
+  MusicIntelligenceTool/MusicIntelligenceTool/CloudPlanning.swift \
+  MusicIntelligenceTool/MusicIntelligenceTool/CloudClient.swift \
+  MusicIntelligenceTool/MusicIntelligenceTool/ExternalModels.swift \
   MusicIntelligenceTool/MusicIntelligenceTool/Studio.swift \
   MusicIntelligenceTool/MusicIntelligenceTool/ModelEnvironment.swift \
   MusicIntelligenceTool/MusicIntelligenceTool/ShortcutSettings.swift \

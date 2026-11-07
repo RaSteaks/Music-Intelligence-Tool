@@ -227,6 +227,7 @@ def alignment_weights(language, download):
 
 
 PACKAGES = {"base": ("mcp", "numpy", "librosa"), "structure": ("all-in-one-mlx", "mlx", "natten-mlx"),
+            "melody": ("essentia", "numpy", "soundfile"),
             "stems": ("demucs-mlx", "mlx"), "lyrics": ("openai-whisper", "torch"),
             "emotion": ("torch", "torchaudio", "transformers", "music21", "pytorch-lightning", "gradio"),
             "align-zh": ("whisperx", "torch", "torchaudio", "transformers"),
@@ -246,6 +247,10 @@ def inspect_feature(feature, root, download=False):
         return blocked("缺少 Python 依赖：" + "、".join(missing))
     if feature == "base":
         return cached(True, "声学分析、和声与 MCP 依赖已安装")
+    if feature == "melody":
+        from essentia_runtime import vector_algorithm
+        vector_algorithm("PredominantPitchMelodia")
+        return cached(True, "Essentia Melodia 已安装，无需额外模型权重")
     if feature == "structure":
         return structure_weights(download)
     if feature == "stems":

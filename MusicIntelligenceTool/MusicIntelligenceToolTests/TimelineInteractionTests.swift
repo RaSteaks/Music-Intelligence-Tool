@@ -4,7 +4,7 @@ import Testing
 
 @MainActor
 struct TimelineInteractionTests {
-    @Test func outPointsCreateContiguousSelectionsAndSections() throws {
+    @Test func cuePointsBuildSectionsAndSupportCorrections() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let studio = Studio(root: root)
@@ -24,10 +24,6 @@ struct TimelineInteractionTests {
         studio.add("section")
         #expect(studio.song?.sections.map(\.start) == [0, 12.5, 23.75, 50])
         #expect(studio.song?.sections.map(\.end) == [12.5, 23.75, 50, 60])
-    }
-
-    @Test func explicitEntryStartsANewPairInsidePreviousSelection() {
-        let studio = makeStudio()
         studio.selection = 0...20
         studio.seek(10)
         studio.markPoint(.entry)
@@ -39,10 +35,6 @@ struct TimelineInteractionTests {
         studio.seek(40)
         studio.markPoint(.exit)
         #expect(studio.selection == 30...40)
-    }
-
-    @Test func repeatedEarlierAndClearedOutPointsKeepValidRanges() {
-        let studio = makeStudio()
         studio.selection = 10...20
         studio.seek(20)
         studio.markPoint(.exit)
@@ -59,7 +51,7 @@ struct TimelineInteractionTests {
         #expect(studio.selection == 0...8)
     }
 
-    @Test func rulerDragSeeksContinuouslyWithoutChangingSelection() throws {
+    @Test func rulerAndWaveformGesturesKeepSeparateResponsibilities() throws {
         let studio = makeStudio()
         studio.selection = 5...15
         studio.song?.marks.append(Mark(kind: "beat", start: 30, end: 30, source: "fixture"))
@@ -75,45 +67,29 @@ struct TimelineInteractionTests {
         #expect(studio.cursor == 45)
         #expect(studio.selection == 5...15)
         #expect(studio.selected == selected)
-    }
-
-    @Test func rulerUsesVisibleWindowAndClampsOutsideCanvas() throws {
-        let studio = makeStudio()
-        let canvas = try makeCanvas(studio, window: 10...20)
-        canvas.mouseDown(with: try event(.leftMouseDown, at: NSPoint(x: 300, y: 25), in: canvas))
+        // The same workspace supports zoomed scrubbing, range selection and handle edits.
+        studio.selection = nil
+        let zoomed = try makeCanvas(studio, window: 10...20)
+        zoomed.mouseDown(with: try event(.leftMouseDown, at: NSPoint(x: 300, y: 25), in: zoomed))
         #expect(studio.cursor == 15)
-        canvas.mouseDragged(with: try event(.leftMouseDragged, at: NSPoint(x: -50, y: 10), in: canvas))
+        zoomed.mouseDragged(with: try event(.leftMouseDragged, at: NSPoint(x: -50, y: 10), in: zoomed))
         #expect(studio.cursor == 10)
-        canvas.mouseUp(with: try event(.leftMouseUp, at: NSPoint(x: 650, y: 10), in: canvas))
-        #expect(studio.cursor == 20)
-        #expect(studio.selection == nil)
-    }
-
-    @Test func waveformStillSelectsAfterRulerGestureEnds() throws {
-        let studio = makeStudio()
-        let canvas = try makeCanvas(studio)
-        canvas.mouseDown(with: try event(.leftMouseDown, at: NSPoint(x: 100, y: 10), in: canvas))
-        canvas.mouseUp(with: try event(.leftMouseUp, at: NSPoint(x: 100, y: 10), in: canvas))
+        zoomed.mouseUp(with: try event(.leftMouseUp, at: NSPoint(x: 650, y: 10), in: zoomed))
+        #expect(studio.cursor == 20 && studio.selection == nil)
         canvas.mouseDown(with: try event(.leftMouseDown, at: NSPoint(x: 200, y: 160), in: canvas))
         canvas.mouseDragged(with: try event(.leftMouseDragged, at: NSPoint(x: 400, y: 160), in: canvas))
         canvas.mouseUp(with: try event(.leftMouseUp, at: NSPoint(x: 400, y: 160), in: canvas))
-        #expect(studio.selection == 20...40)
-        #expect(studio.cursor == 20)
-    }
-
-    @Test func draggingOutHandleEditsExistingSelection() throws {
-        let studio = makeStudio()
+        #expect(studio.selection == 20...40 && studio.cursor == 20)
         studio.selection = 5...15
-        let canvas = try makeCanvas(studio)
-        canvas.mouseDown(with: try event(.leftMouseDown, at: NSPoint(x: 145, y: 99), in: canvas))
-        canvas.mouseDragged(with: try event(.leftMouseDragged, at: NSPoint(x: 190, y: 99), in: canvas))
-        canvas.mouseUp(with: try event(.leftMouseUp, at: NSPoint(x: 190, y: 99), in: canvas))
-        #expect(studio.selection == 5...19)
-        #expect(studio.cursor == 0)
+        let handles = try makeCanvas(studio)
+        handles.mouseDown(with: try event(.leftMouseDown, at: NSPoint(x: 145, y: 99), in: handles))
+        handles.mouseDragged(with: try event(.leftMouseDragged, at: NSPoint(x: 190, y: 99), in: handles))
+        handles.mouseUp(with: try event(.leftMouseUp, at: NSPoint(x: 190, y: 99), in: handles))
+        #expect(studio.selection == 5...19 && studio.cursor == 20)
     }
 
     private func makeStudio() -> Studio {
-        let studio = Studio()
+        let studio = Studio(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         studio.song = SongRecord(url: URL(fileURLWithPath: "/study.wav"), duration: 60)
         studio.selected = studio.song?.sections.first?.id
         return studio

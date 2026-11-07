@@ -1,93 +1,60 @@
 """One job, one JSON result. Native model logs never share the result channel."""
 import argparse
 import json
-import math
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import uuid
+from analysis_support import cut, mark
 
 
-def mark(kind, start, end, source, label=None, metrics=None):
-    return {
-        "id": str(uuid.uuid4()), "kind": kind, "start": float(start), "end": float(end),
-        "source": source, "startConfirmed": False, "endConfirmed": False,
-        "fields": {"label": {"suggested": label}} if label else {},
-        "metrics": {k: float(v) for k, v in (metrics or {}).items() if math.isfinite(v)},
-    }
+def acoustic_or_harmony(audio, kind, offset, duration, record=None):
+    if kind == "harmony":
+        from harmony_analysis import analyze_harmony
+        return analyze_harmony(audio, offset, duration, record)
 
-
-def cut(source, output, start, length):
-    subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-ss", str(start),
-                    "-i", str(source), "-t", str(length), "-vn", "-c:a", "pcm_f32le", str(output)], check=True)
-
-
-def acoustic_or_harmony(audio, kind, offset, duration):
     import librosa
     import numpy as np
 
-    y, sr = librosa.load(audio, sr=22050)
+    y, sr = librosa.load(audio, sr=22050, mono=False)
     rows = []
-    if not len(y) or np.max(np.abs(y)) < 1e-5:
+    if not y.size:
+        return {"marks": rows}
+    loudness = []
+    if kind == "acoustics":
+        from audio_metrics import measure_audio
+        metrics, loudness = measure_audio(audio)
+        summary = mark("loudness", offset, offset + duration, "FFmpeg EBU R128 / PCM", "响度与动态统计", metrics)
+        summary["fields"]["content"] = {"suggested": "仅统计此区间，保留原始声道和增益。峰均比与响度范围不同；满幅采样不等同于已听出失真。静音或不足测量窗口的指标留空。"}
+        rows.append(summary)
+    if np.max(np.abs(y)) < 1e-5:
         return {"marks": rows}
     hop = 512
+    n_fft = 2048
+    spectrum = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop))**2
+    # Average power rather than waveforms so anti-phase stereo does not vanish.
+    if y.ndim == 2:
+        spectrum = spectrum.mean(axis=0)
     times = np.arange(0, duration, 1.0)
-    if kind == "harmony":
-        chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=hop)
-        names = "C C# D Eb E F F# G Ab A Bb B".split()
-        profiles = np.array([[6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
-                             [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]])
-        key_scores = [(np.corrcoef(np.roll(profile, i), chroma.mean(axis=1))[0, 1],
-                       names[i] + (" minor" if mode else " major"))
-                      for mode, profile in enumerate(profiles) for i in range(12)]
-        templates = []
-        for i, name in enumerate(names):
-            for third, suffix in ((4, ""), (3, "m")):
-                vector = np.zeros(12)
-                vector[[i, (i + third) % 12, (i + 7) % 12]] = 1 / np.sqrt(3)
-                templates.append((vector, name + suffix))
-        for t in times:
-            frame = chroma[:, int(t*sr/hop):max(int((t+1)*sr/hop), int(t*sr/hop)+1)]
-            if not frame.size:
-                continue
-            energy = frame.mean(axis=1)
-            scores = sorted([(np.dot(energy, v) / max(np.linalg.norm(energy), 1e-9), n)
-                             for v, n in templates], reverse=True)
-            if scores[0][0] < .65 or scores[0][0] - scores[1][0] < .025:
-                continue
-            end = offset + min(duration, t + 1)
-            if rows and rows[-1]["fields"]["label"]["suggested"] == scores[0][1] and rows[-1]["end"] == offset+t:
-                rows[-1]["end"] = end
-            else:
-                rows.append(mark("chord", offset+t, end, "librosa", scores[0][1]))
-        valid = [pair for pair in key_scores if math.isfinite(pair[0])]
-        return {"marks": rows, "key": max(valid)[1] if valid and max(valid)[0] > .4 else None}
-
-    # EBU R128 on the original channels; do not normalize or downmix before measuring loudness.
-    output = subprocess.check_output(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(audio),
-                                      "-af", "ebur128=metadata=1,ametadata=print:key=lavfi.r128.S:file=-",
-                                      "-f", "null", "-"], text=True)
-    loudness = [float(line.split("=")[1]) for line in output.splitlines() if line.startswith("lavfi.r128.S=")]
-    attacks = librosa.onset.onset_detect(y=y, sr=sr, hop_length=hop, units="time")
+    onset_envelope = librosa.onset.onset_strength(S=librosa.power_to_db(spectrum), sr=sr, hop_length=hop)
+    attacks = librosa.onset.onset_detect(onset_envelope=onset_envelope, sr=sr, hop_length=hop, units="time")
     rows.extend(mark("onset", offset+t, offset+t, "librosa") for t in attacks if t < duration)
     frequencies = librosa.fft_frequencies(sr=sr)
-    spectrum = np.abs(librosa.stft(y, hop_length=hop))
     for t in times:
         piece = spectrum[:, int(t*sr/hop):int((t+1)*sr/hop)]
         if not piece.size:
             continue
-        power = (piece**2).mean(axis=1)
+        power = piece.mean(axis=1, dtype=np.float64)
         total = max(power.sum(), 1e-12)
-        metrics = {"rms": np.sqrt(np.mean(y[int(t*sr):int((t+1)*sr)]**2)),
+        metrics = {"rms": np.sqrt(np.mean(y[..., int(t*sr):int((t+1)*sr)]**2)),
                    "low_share": power[frequencies < 250].sum()/total,
                    "mid_share": power[(frequencies >= 250) & (frequencies < 4000)].sum()/total,
                    "high_share": power[frequencies >= 4000].sum()/total,
-                   "centroid_hz": np.average(frequencies, weights=piece.mean(axis=1)+1e-12),
+                   "centroid_hz": np.average(frequencies, weights=np.sqrt(piece).mean(axis=1)+1e-12),
                    "onsets_per_s": np.sum((attacks >= t) & (attacks < t+1)) / min(1, duration-t)}
         levels = loudness[int(t*10):int((t+1)*10)]
-        levels = [x for x in levels if x > -119]
+        levels = [x for x in levels if x is not None]
         if levels:
             metrics["short_lufs"] = np.mean(levels)
         rows.append(mark("acoustic", offset+t, offset+min(duration, t+1), "FFmpeg/librosa", metrics=metrics))
@@ -182,7 +149,8 @@ def emotions(source, start, end, runtime, scratch, sections):
 
 def main():
     parser = argparse.ArgumentParser()
-    for name in ("job", "record", "output", "runtime"):
+    parser.add_argument("job", choices=["structure", "acoustics", "harmony", "rhythm", "repetition", "melody", "lyrics", "emotion", "events", "alignment"])
+    for name in ("record", "output", "runtime"):
         parser.add_argument(name)
     parser.add_argument("start", type=float)
     parser.add_argument("end", type=float)
@@ -199,17 +167,33 @@ def main():
         elif args.job == "emotion":
             sections = [(r["start"], r["end"]) for r in record["marks"] if r["kind"] == "section"]
             result = emotions(source, start, end, runtime, scratch, sections)
+        elif args.job == "events":
+            from activity_analysis import analyze_activity
+            result = analyze_activity(source, start, end, record.get("stems", {}), scratch, record.get("bpm"))
         else:
             clip = scratch/"clip.wav"
-            if args.job in ("lyrics", "alignment"):
+            if args.job in ("lyrics", "alignment", "melody"):
                 source = Path(record.get("stems", {}).get("vocals", source))
-            cut(source, clip, start, end-start)
+            if args.job == "acoustics":
+                from audio_metrics import measurement_codec
+                cut(source, clip, start, end-start, codec=measurement_codec(source))
+            else:
+                cut(source, clip, start, end-start)
             if args.job == "lyrics":
                 result = lyrics(clip, start, end-start)
             elif args.job == "alignment":
                 result = align(clip, start, record, end)
+            elif args.job == "rhythm":
+                from rhythm_analysis import analyze_rhythm
+                result = analyze_rhythm(clip, start, end-start, record)
+            elif args.job == "repetition":
+                from repetition_analysis import analyze_repetition
+                result = analyze_repetition(clip, end-start, record)
+            elif args.job == "melody":
+                from melody_analysis import analyze_melody
+                result = analyze_melody(clip, start, end-start, "vocals" in record.get("stems", {}))
             else:
-                result = acoustic_or_harmony(clip, args.job, start, end-start)
+                result = acoustic_or_harmony(clip, args.job, start, end-start, record)
         Path(args.output).write_text(json.dumps(result, allow_nan=False), encoding="utf-8")
 
 

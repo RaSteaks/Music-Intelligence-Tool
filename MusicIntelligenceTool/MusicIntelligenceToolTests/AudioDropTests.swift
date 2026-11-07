@@ -4,7 +4,7 @@ import Testing
 
 @MainActor
 struct AudioDropTests {
-    @Test func droppedAudioLoadsWaveformAndRestoresSavedEdits() async throws {
+    @Test func importSwitchAndReopenPreserveEdits() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let studio = Studio(root: fixture.library)
@@ -18,14 +18,7 @@ struct AudioDropTests {
         #expect(reopened.openDroppedAudio([fixture.first]))
         try await waitForWaveform(reopened)
         #expect(reopened.row?.label == "手工段落")
-    }
-
-    @Test func droppingAnotherSongResetsTransportAndAcceptsUppercaseExtension() async throws {
-        let fixture = try Fixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let studio = Studio(root: fixture.library)
-        #expect(studio.openDroppedAudio([fixture.first]))
-        try await waitForWaveform(studio)
+        #expect(reopened.song?.revision == studio.song?.revision)
         let firstID = studio.song?.trackID
         studio.seek(8)
         studio.selection = 2...5
@@ -41,7 +34,7 @@ struct AudioDropTests {
         #expect(!studio.playing)
     }
 
-    @Test func invalidDropsReportErrorsAndPreserveCurrentSong() async throws {
+    @Test func invalidImportsAndBusyStatePreserveCurrentSong() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let studio = Studio(root: fixture.library)
@@ -62,17 +55,8 @@ struct AudioDropTests {
             #expect(studio.song?.trackID == trackID)
             #expect(studio.selection == 2...5)
         }
-    }
-
-    @Test func activeAnalysisBlocksSongChangesButAllowsCurrentFile() async throws {
-        let fixture = try Fixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let studio = Studio(root: fixture.library)
-        #expect(studio.openDroppedAudio([fixture.first]))
-        try await waitForWaveform(studio)
         studio.activeJob = .structure
         defer { studio.activeJob = nil }
-        let trackID = studio.song?.trackID
         studio.seek(8)
         #expect(!studio.openDroppedAudio([fixture.second]))
         #expect(studio.notice == "请等待当前分析或取消后切换歌曲。")

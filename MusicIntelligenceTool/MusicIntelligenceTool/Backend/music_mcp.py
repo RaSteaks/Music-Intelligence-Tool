@@ -23,20 +23,32 @@ def read_song(track_id):
 def effective(row, confirmed_only=False):
     fields = {}
     hints = {}
+    has_confirmation = row["startConfirmed"] or row["endConfirmed"]
     for name, values in row["fields"].items():
         if values.get("hint"):
             hints[name] = values["hint"]
         if "confirmed" in values:
             fields[name] = {"value": values["confirmed"], "source": "user"}
-        elif not confirmed_only and "suggested" in values:
-            fields[name] = {"value": values["suggested"], "source": row["source"]}
-    if confirmed_only and not (fields or row["startConfirmed"] or row["endConfirmed"]):
+            has_confirmation = True
+        elif not confirmed_only and "suggested" in values and not row.get("analysisStale") and not values.get("rejected") and not (values.get("origin") or {}).get("stale"):
+            origin = values.get("origin")
+            fields[name] = {"value": values["suggested"], "source":
+                            f"{origin['provider']}/{origin['model']}" if origin else row["source"]}
+        if name in fields and values.get("origin"):
+            fields[name]["origin"] = values["origin"]
+    if (confirmed_only or row.get("analysisStale")) and not has_confirmation:
+        return None
+    if row["kind"] == "insight" and not has_confirmation and not any(name in fields for name in ("label", "content", "mood")):
         return None
     item = {"id": row["id"], "type": row["kind"], "start_s": row["start"], "end_s": row["end"],
             "start_source": "user" if row["startConfirmed"] else row["source"],
             "end_source": "user" if row["endConfirmed"] else row["source"], "fields": fields}
     if not confirmed_only:
-        item.update(hints=hints, metrics=row["metrics"])
+        item.update(hints=hints, metrics={} if row.get("analysisStale") else row["metrics"])
+    if row.get("analysisStale"):
+        item["analysis_stale"] = True
+    if row.get("relatedIDs"):
+        item["related_ids"] = row["relatedIDs"]
     return item
 
 
@@ -60,12 +72,24 @@ def analyze_music(path: str) -> dict[str, object]:
 
 @server.tool()
 def get_music_overview(track_id: str) -> dict[str, object]:
-    """Return the latest saved revision, module status, duration, tempo, key, sections and emotion windows."""
+    """Return revision, statuses, coverage and section, mood, loudness, rhythm, melody and repetition
+    summaries. Include current activity/insight candidates and cloud task metadata."""
     song = read_song(track_id)
     return {"track_id": track_id, "revision": song["revision"], "duration_s": song["duration"],
             "bpm": song.get("bpm"), "key": song.get("key"), "status": song["status"],
-            "sections": [effective(m) for m in sorted(song["marks"], key=lambda r: r["start"]) if m["kind"]=="section"],
-            "emotions": [effective(m) for m in song["marks"] if m["kind"]=="emotion"]}
+            "sections": [item for m in sorted(song["marks"], key=lambda r: r["start"]) if m["kind"] == "section" and (item := effective(m)) is not None],
+            "emotions": [item for m in song["marks"] if m["kind"] == "emotion" and (item := effective(m)) is not None],
+            "insights": [item for m in song["marks"] if m["kind"] == "insight" and (item := effective(m)) is not None],
+            "cloud_runs": [{key: value for key, value in run.items() if key != "context"}
+                           for run in song.get("cloudRuns") or []],
+            "cloud_batches": song.get("cloudBatches") or [], "warnings": song.get("warnings") or {},
+            "coverage": song.get("coverage") or {},
+            "events": [item for m in song["marks"] if m["kind"] == "event" and (item := effective(m)) is not None],
+            "rhythm": [item for m in song["marks"] if m["kind"] == "rhythm_summary" and (item := effective(m)) is not None],
+            "melody": [item for m in song["marks"] if m["kind"] == "melody_summary" and (item := effective(m)) is not None],
+            "loudness": [item for m in song["marks"] if m["kind"] == "loudness" and (item := effective(m)) is not None],
+            "tonality_regions": [item for m in song["marks"] if m["kind"] in ("key_region", "modulation") and (item := effective(m)) is not None],
+            "repetitions": [item for m in song["marks"] if m["kind"] == "repetition" and (item := effective(m)) is not None]}
 
 
 @server.tool()
@@ -79,7 +103,9 @@ def get_music_record(track_id: str) -> dict[str, object]:
 def get_music_timeline(track_id: str, start_s: float, end_s: float, types: list[str] | None = None,
                        confirmed_only: bool = False) -> dict[str, object]:
     """Query [start_s,end_s) in original audio seconds. Types: section, beat, downbeat, onset, acoustic,
-    emotion, chord, lyric, word, note. Hints are separate from confirmed values."""
+    emotion, chord, key, key_region, modulation, lyric, word, note, insight, loudness, event,
+    rhythm_beat, tempo, rhythm_summary, repetition, pitch, melody_note, melody_summary, melody_phrase, melody_motif. Stale or rejected suggestions are
+    excluded unless the field has a human confirmation. Hints are separate from confirmed values."""
     if not (math.isfinite(start_s) and math.isfinite(end_s) and 0 <= start_s < end_s):
         raise ValueError("无效的时间范围")
     song = read_song(track_id)
