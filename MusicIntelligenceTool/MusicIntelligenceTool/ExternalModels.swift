@@ -122,6 +122,18 @@ final class ExternalModels {
         var connections: [ModelConnection] = []
         var textConnectionID: String?
         var audioConnectionID: String?
+
+        var suggestedTextConnectionID: String? {
+            let preferred = connections.first { $0.id == textConnectionID } ?? connections.first
+            guard let preferred, preferred.verifiedTextAt == nil, preferred.verifiedAudioAt != nil else {
+                return preferred?.id
+            }
+            // The first connection can be saved as both defaults. An audio check
+            // only validates audio requests, so prefer a verified text connection on the same service.
+            return connections.first {
+                $0.verifiedTextAt != nil && $0.provider == preferred.provider && $0.baseURL == preferred.baseURL
+            }?.id ?? preferred.id
+        }
     }
     private(set) var configuration = Configuration()
     private(set) var loadError: String?

@@ -179,8 +179,10 @@ struct CloudAnalysisSheet: View {
 
     private func selectDefault() {
         let config = studio.externalModels.configuration
-        connectionID = (usesAudio ? config.audioConnectionID : config.textConnectionID) ?? config.connections.first?.id ?? ""
-        summaryConnectionID = config.textConnectionID ?? config.connections.first?.id ?? ""
+        let audioID = config.audioConnectionID ?? config.connections.first?.id
+        let textID = config.suggestedTextConnectionID
+        connectionID = (usesAudio ? audioID : textID) ?? ""
+        summaryConnectionID = textID ?? ""
         error = nil
     }
 

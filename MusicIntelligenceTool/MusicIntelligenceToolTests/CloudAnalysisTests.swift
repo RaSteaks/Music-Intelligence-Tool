@@ -103,6 +103,31 @@ struct CloudAnalysisTests {
         #expect(try String(contentsOf: file, encoding: .utf8) == "broken")
     }
 
+    @Test func textAnalysisPrefersVerifiedConnectionOnTheSameService() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ExternalModels(directory: root, credentials: TestCredentials())
+        var audio = ModelConnection(); audio.model = "fixture-audio"
+        try store.save(audio)
+        try store.recordVerification(audio, task: .audio)
+
+        var otherService = ModelConnection(); otherService.model = "fixture-text"
+        otherService.baseURL = "https://other.invalid/v1"
+        try store.save(otherService)
+        try store.recordVerification(otherService, task: .interpretation)
+        #expect(store.configuration.suggestedTextConnectionID == audio.id)
+
+        var text = ModelConnection(); text.model = "fixture-text"
+        try store.save(text)
+        #expect(store.configuration.suggestedTextConnectionID == audio.id)
+        try store.recordVerification(text, task: .interpretation)
+        #expect(store.configuration.suggestedTextConnectionID == text.id)
+        #expect(store.configuration.textConnectionID == audio.id && store.configuration.audioConnectionID == audio.id)
+
+        try store.recordVerification(audio, task: .interpretation)
+        #expect(store.configuration.suggestedTextConnectionID == audio.id)
+    }
+
     @Test func providerContractEnforcesScopeAndRejectsUnusableResponses() async throws {
         let fixture = try await CloudFixture(); defer { fixture.stop() }
         var song = try fixture.song(seconds: 3)
