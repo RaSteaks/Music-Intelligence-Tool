@@ -4,6 +4,37 @@ import Testing
 
 @MainActor
 struct TimelineInteractionTests {
+    @Test func overflowingLanesScrollBelowTheWaveControls() {
+        var song = SongRecord(url: URL(fileURLWithPath: "/lanes.wav"), duration: 60)
+        let kinds = ["lyric", "word", "note", "chord", "emotion", "insight", "tempo", "repetition"]
+        song.marks += ["silence", "vocals", "drums", "bass"].map {
+            Mark(kind: "event", start: 0, end: 1, source: "test", fields: ["event_type": ReviewedText(suggested: $0)])
+        }
+        let visible = Set(kinds + ["event"])
+        for height: CGFloat in [210, 300, 600] {
+            let layout = CanvasLayout(record: song, visible: visible, selected: nil, height: height, scroll: 99)
+            #expect(layout.lanes.count == 12)
+            #expect(layout.lanesTop >= CanvasLayout.lanesFloor)
+            #expect(layout.visibleLanes.allSatisfy { layout.laneTop($0) > CanvasLayout.lanesFloor })
+            #expect(layout.visibleLanes.upperBound == 12)
+        }
+        let small = CanvasLayout(record: song, visible: visible, selected: nil, height: 300)
+        #expect(small.overflows && small.firstLane == 0 && !small.canScrollUp && small.canScrollDown)
+        // Hiding one event sub-lane removes only that lane.
+        let hidden = CanvasLayout(record: song, visible: visible, hidden: ["event:vocals"], selected: nil, height: 900)
+        #expect(hidden.lanes.filter { $0.hasPrefix("event:") } == ["event:silence", "event:drums", "event:bass"])
+    }
+
+    @Test func blankLyricsReadAsUnfilledUntilCleared() {
+        var lyric = Mark.manual("lyric", from: 0, to: 1, label: "")
+        #expect(lyric.provenance == .empty && lyric.fields["label"]?.provenance == .empty)
+        #expect(lyric.fields["label"]?.confirmed == nil && lyric.label == "")
+        lyric.fields["label"]?.confirmed = "词"
+        #expect(lyric.provenance == .confirmed)
+        lyric.fields["label"]?.confirmed = ""
+        #expect(lyric.provenance == .cleared && lyric.fields["label"]?.provenance == .cleared)
+    }
+
     @Test func cuePointsBuildSectionsAndSupportCorrections() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

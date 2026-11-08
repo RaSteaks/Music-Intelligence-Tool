@@ -41,6 +41,15 @@ enum Runtime {
     }
 }
 
+/// A track the user opened, kept per library so the record shelf can render it from its saved analysis.
+struct RecentTrack: Codable, Equatable, Identifiable {
+    var trackID: String
+    var path: String
+    var openedAt: Date
+    var id: String { trackID }
+    var title: String { URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent }
+}
+
 @MainActor @Observable
 final class Studio {
     static let audioContentTypes = ["wav", "mp3", "flac", "m4a"].compactMap { UTType(filenameExtension: $0) }
@@ -69,6 +78,10 @@ final class Studio {
     var playing = false
     var stem = "原曲"
     var visibleKinds: Set<String> = ["section", "note"]
+    /// Event sub-lanes ("event:vocals" …) hidden one at a time while the event track itself stays on.
+    var hiddenLanes: Set<String> = []
+    /// First data lane shown when more lanes are on than the canvas can fit.
+    var laneScroll = 0
     var notice: String?
     var serviceStatus = "未启动"
     private var agentSendID: UUID?
@@ -97,12 +110,15 @@ final class Studio {
     var cloudProgress: String?
     private(set) var completedComparisonID: String?
     var cloudRunning: Bool { cloudTask != nil }
+    private(set) var recents: [RecentTrack] = []
+    private var recentsFile: URL { root.appendingPathComponent("recents.json") }
 
     init(root: URL? = nil, credentials: CloudCredentialStore = KeychainCredentials()) {
         let custom = ProcessInfo.processInfo.environment["MIT_LIBRARY"].map { URL(fileURLWithPath: $0) }
         self.root = root ?? custom ?? URL.applicationSupportDirectory.appendingPathComponent("MusicIntelligenceTool/Tracks")
         modelEnvironment = ModelEnvironment(cacheDirectory: self.root.appendingPathComponent(".environment"))
         externalModels = ExternalModels(directory: self.root.appendingPathComponent(".external-models"), credentials: credentials)
+        recents = (try? JSONDecoder().decode([RecentTrack].self, from: Data(contentsOf: recentsFile))) ?? []
     }
 
     var row: Mark? { song?.marks.first { $0.id == selected } }
@@ -177,6 +193,7 @@ final class Studio {
         player?.stop()
         player = audio
         song = record
+        remember(record)
         // Invalidate old receipts even when switching away and back to the same track.
         // The agent can still read the previous snapshot, but it no longer owns this workspace's status.
         agentSendID = nil
@@ -197,6 +214,30 @@ final class Studio {
                 if !Task.isCancelled { peaks = bins }
             } catch { if !Task.isCancelled { notice = error.localizedDescription } }
         }
+    }
+
+    private func remember(_ record: SongRecord) {
+        recents.removeAll { $0.trackID == record.trackID }
+        recents.insert(RecentTrack(trackID: record.trackID, path: record.path, openedAt: Date()), at: 0)
+        recents = Array(recents.prefix(12))
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try JSONEncoder().encode(recents).write(to: recentsFile, options: .atomic)
+        } catch { /* The shelf is a convenience; failing to save it must not block opening a song. */ }
+    }
+
+    func openRecent(_ recent: RecentTrack) {
+        guard FileManager.default.fileExists(atPath: recent.path) else {
+            notice = "找不到原音频文件：" + recent.path
+            return
+        }
+        do { try open(URL(fileURLWithPath: recent.path)) } catch { notice = error.localizedDescription }
+    }
+
+    /// Reads a saved record for the shelf without opening it.
+    nonisolated static func savedRecord(in root: URL, trackID: String) -> SongRecord? {
+        let file = root.appendingPathComponent(trackID).appendingPathComponent("analysis.json")
+        return try? JSONDecoder().decode(SongRecord.self, from: Data(contentsOf: file))
     }
 
     func openStudy() {
@@ -338,8 +379,9 @@ final class Studio {
             visibleKinds.insert(kind)
         }
     }
-    func sendToAgent() async {
-        guard !sendingToAgent, let song else { return }
+    /// Sends `snapshot` when given (the revision the handoff preview showed), otherwise the current song.
+    func sendToAgent(_ snapshot: SongRecord? = nil) async {
+        guard !sendingToAgent, let song = snapshot ?? self.song else { return }
         let endpoint = Self.channelEndpoint
         // Capture the clicked revision before awaiting: analysis and edits may continue during delivery.
         let sendID = UUID()

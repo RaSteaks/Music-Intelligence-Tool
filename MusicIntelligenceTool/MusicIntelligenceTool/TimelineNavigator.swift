@@ -1,61 +1,22 @@
 import SwiftUI
 
-/// The preview uses the same time window as the detail view so it stays aligned at either end.
+/// A permanent whole-song strip while zoomed in. Dragging the viewport scrolls the detail view;
+/// clicking elsewhere centres the viewport there.
 struct TimelineNavigator: View {
     @Binding var pan: Double
     let window: ClosedRange<Double>
     let duration: Double
     let peaks: [Float]
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var dragging = false
-    @State private var showing = false
-    @State private var dismissal: Task<Void, Never>?
+    @State private var grab: CGFloat?
 
     var body: some View {
-        Slider(value: $pan, in: 0...1) { editing in
-            dragging = editing
-            reveal()
-        }
-        .accessibilityLabel("滚动时间轴")
-        .accessibilityValue(clockText(window.lowerBound) + " 至 " + clockText(window.upperBound))
-        .overlay(alignment: .top) {
-            if showing {
-                preview
-                    .alignmentGuide(.top) { $0[.bottom] + 6 }
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4)))
-            }
-        }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: showing)
-        .onChange(of: pan) { if !dragging { reveal() } }
-        .onDisappear { dismissal?.cancel() }
-    }
-
-    private func reveal() {
-        dismissal?.cancel()
-        showing = true
-        guard !dragging else { return }
-        dismissal = Task {
-            try? await Task.sleep(for: .milliseconds(550))
-            if !Task.isCancelled { showing = false }
-        }
-    }
-
-    private var preview: some View {
-        VStack(spacing: 4) {
-            HStack {
-                Text("全曲定位")
-                Spacer()
-                Text(clockText(window.lowerBound) + " – " + clockText(window.upperBound))
-                    .monospacedDigit()
-            }
-            .font(.caption2)
-            .foregroundStyle(.white.opacity(0.85))
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let viewport = viewportRect(width: width, height: geometry.size.height)
             Canvas { context, size in
                 let columns = max(1, Int(size.width))
                 var wave = Path()
-                let scale = (size.height / 2 - 1) / CGFloat(max(peaks.max() ?? 0, 0.01))
+                let scale = (size.height / 2 - 2) / CGFloat(max(peaks.max() ?? 0, 0.01))
                 for column in 0..<columns where !peaks.isEmpty {
                     let start = column * peaks.count / columns
                     let end = max(start + 1, (column + 1) * peaks.count / columns)
@@ -64,20 +25,34 @@ struct TimelineNavigator: View {
                     wave.move(to: CGPoint(x: x, y: size.height / 2 - h))
                     wave.addLine(to: CGPoint(x: x, y: size.height / 2 + h))
                 }
-                context.stroke(wave, with: .color(.mint.opacity(0.7)), lineWidth: 1)
-
-                let left = size.width * window.lowerBound / duration
-                let width = size.width * (window.upperBound - window.lowerBound) / duration
-                let rect = CGRect(x: left, y: 0, width: width, height: size.height)
-                let shape = Path(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 3)
-                context.fill(shape, with: .color(.white.opacity(0.22)))
-                context.stroke(shape, with: .color(.white.opacity(0.9)), lineWidth: 1)
+                context.stroke(wave, with: .color(Tone.sound.color.opacity(0.55)), lineWidth: 1)
+                let shape = Path(roundedRect: viewport.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 3)
+                context.fill(shape, with: .color(Tone.sound.color.opacity(0.12)))
+                context.stroke(shape, with: .color(Tone.ink.color.opacity(0.75)), lineWidth: 1)
             }
-            .frame(height: 30)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                if grab == nil {
+                    grab = viewport.contains(value.startLocation) ? value.startLocation.x - viewport.minX : viewport.width / 2
+                }
+                let travel = max(1, width - viewport.width)
+                pan = min(1, max(0, (value.location.x - (grab ?? 0)) / travel))
+            }.onEnded { _ in grab = nil })
         }
-        .padding(8)
-        .background(Color(red: 0.09, green: 0.14, blue: 0.16), in: RoundedRectangle(cornerRadius: 7))
-        .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(.white.opacity(0.18)) }
-        .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
+        .frame(height: 24)
+        .background(Tone.paper.color, in: RoundedRectangle(cornerRadius: 4))
+        .overlay { RoundedRectangle(cornerRadius: 4).strokeBorder(Tone.rule.color) }
+        .help("拖动视口框滚动时间轴，点击其他位置跳到该处")
+        .accessibilityRepresentation {
+            Slider(value: $pan, in: 0...1) { Text("滚动时间轴") }
+        }
+        .accessibilityValue(clockText(window.lowerBound) + " 至 " + clockText(window.upperBound))
+    }
+
+    private func viewportRect(width: CGFloat, height: CGFloat) -> CGRect {
+        guard duration > 0 else { return .zero }
+        let left = width * window.lowerBound / duration
+        let span = max(6, width * (window.upperBound - window.lowerBound) / duration)
+        return CGRect(x: left, y: 0, width: span, height: height)
     }
 }

@@ -28,6 +28,7 @@ struct Mark: Codable, Identifiable, Equatable {
         if let confirmed = fields["label"]?.confirmed { return confirmed }
         if analysisStale == true { return "待更新的分析" }
         if let value = fields["label"]?.value { return value }
+        if let field = fields["label"], field.suggested == nil { return "" }
         if kind == "insight" { return fields["label"]?.origin?.stale == true ? "待更新的解读" : "已拒绝的解读" }
         return kind
     }
@@ -38,8 +39,9 @@ struct Mark: Codable, Identifiable, Equatable {
         start == end ? range.contains(start) : start < range.upperBound && end > range.lowerBound
     }
     static func manual(_ kind: String, from: Double, to: Double, label: String) -> Mark {
+        // An empty label is an unfilled slot, not a confirmed clear.
         Mark(kind: kind, start: from, end: to, source: "user", startConfirmed: true, endConfirmed: true,
-             fields: ["label": ReviewedText(confirmed: label)])
+             fields: ["label": label.isEmpty ? ReviewedText() : ReviewedText(confirmed: label)])
     }
 }
 
@@ -138,8 +140,8 @@ struct SongRecord: Codable {
         marks[i].endConfirmed = true
         marks.append(right)
         if right.kind == "lyric" {
-            // The original text cannot describe both halves after a manual split.
-            marks[marks.count - 1].fields["label"] = ReviewedText(confirmed: "")
+            // The original text cannot describe both halves after a manual split; the new half starts unfilled.
+            marks[marks.count - 1].fields["label"] = ReviewedText()
             invalidateWords(from: marks[i].start, to: right.end)
         }
     }
