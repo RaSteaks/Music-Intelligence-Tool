@@ -69,6 +69,57 @@ struct ModelEnvironmentTests {
         #expect(saved.checkedAt == checkedAt && saved.reports[.base]?.detail == "检查已恢复")
     }
 
+    @Test func cleanupSelectsKnownModelFilesAndVirtualEnvironments() throws {
+        let files = FileManager.default
+        let root = files.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        defer { try? files.removeItem(at: root) }
+
+        func write(_ relative: String) throws -> URL {
+            let path = root.appendingPathComponent(relative)
+            try files.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("fixture".utf8).write(to: path)
+            return path
+        }
+
+        let runtime = root.appendingPathComponent("runtime")
+        let userHome = root.appendingPathComponent("user")
+        let variables = ["XDG_CACHE_HOME": root.appendingPathComponent("cache").path,
+                         "TORCH_HOME": root.appendingPathComponent("torch").path,
+                         "HF_HUB_CACHE": root.appendingPathComponent("hub").path,
+                         "MIT_WHISPER_MODEL": "turbo"]
+        let weights = try ["cache/whisper/base.pt", "cache/whisper/large-v3-turbo.pt",
+                           "torch/hub/checkpoints/955717e8-8726e21a.th",
+                           "user/.cache/all-in-one-mlx/weights/.harmonix-fold0_mlx.npz.pending.tmp",
+                           "user/.cache/demucs-mlx/htdemucs.safetensors"].map(write)
+        let mert = try write("hub/models--m-a-p--MERT-v1-95M/ref").deletingLastPathComponent()
+        let emotion = try write("runtime/.models/Music2Emotion/music2emo.py").deletingLastPathComponent()
+        let head = try write("runtime/.models/Music2Emotion/saved_models/J_all.ckpt")
+        let venv = try write("runtime/.venv-structure/pyvenv.cfg").deletingLastPathComponent()
+        let external = try write("other/venv/pyvenv.cfg").deletingLastPathComponent()
+        try files.createSymbolicLink(at: runtime.appendingPathComponent(".venv"), withDestinationURL: external)
+        try files.createSymbolicLink(at: userHome.appendingPathComponent(".cache/demucs-mlx/htdemucs_config.json"),
+                                     withDestinationURL: external.appendingPathComponent("pyvenv.cfg"))
+        _ = try write("cache/whisper/small.pt")
+        _ = try write("hub/models--someone--unrelated/ref")
+        _ = try write("runtime/.venv-unrelated/pyvenv.cfg")
+        _ = try write("runtime/.venv-align/notes.txt")
+        _ = try write("runtime/Tracks/analysis.json")
+
+        let modelsOnly = ModelCleanup.models.targets(in: runtime, home: userHome, variables: variables)
+        #expect(modelsOnly.errors.isEmpty)
+        #expect(Set(modelsOnly.items.map(\.path)) == Set((weights + [mert, head]).map(\.path)))
+
+        let everything = ModelCleanup.modelsAndEnvironment.targets(in: runtime, home: userHome, variables: variables)
+        #expect(everything.errors.isEmpty)
+        #expect(Set(everything.items.map(\.path)) == Set((weights + [mert, emotion, venv]).map(\.path)))
+
+        let customModel = ["MIT_WHISPER_MODEL": weights[0].path]
+        let custom = ModelCleanup.models.targets(in: runtime, home: userHome,
+                                                 variables: variables.merging(customModel) { _, new in new })
+        #expect(custom.errors.isEmpty)
+        #expect(Set(custom.items.map(\.path)) == Set((Array(weights.dropFirst(2)) + [mert, head]).map(\.path)))
+    }
+
     private func finish(_ models: ModelEnvironment) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while models.isBusy, ContinuousClock.now < deadline {

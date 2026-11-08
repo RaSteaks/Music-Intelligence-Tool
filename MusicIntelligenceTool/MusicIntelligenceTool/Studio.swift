@@ -32,11 +32,19 @@ enum Runtime {
         let p = Process()
         p.executableURL = executable
         p.arguments = [file.path] + args
-        p.environment = ProcessInfo.processInfo.environment.merging([
+        var environment = ProcessInfo.processInfo.environment.merging([
             "PATH": executable.deletingLastPathComponent().path + ":" + toolPath,
             "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
             "TOKENIZERS_PARALLELISM": "false"
         ]) { _, new in new }
+        // Python.org installations can lack OpenSSL's CA bundle. Use macOS's
+        // CA file for the workers and their children unless the user set one.
+        let systemCA = "/etc/ssl/cert.pem"
+        if environment["SSL_CERT_FILE"] == nil, environment["SSL_CERT_DIR"] == nil,
+           FileManager.default.isReadableFile(atPath: systemCA) {
+            environment["SSL_CERT_FILE"] = systemCA
+        }
+        p.environment = environment
         return p
     }
 }
@@ -446,7 +454,7 @@ final class Studio {
     }
 
     func run(_ jobs: [AnalysisJob], range: ClosedRange<Double>? = nil, skipCompleted: Bool = false) {
-        guard activeJob == nil, let song else { return }
+        guard activeJob == nil, !modelEnvironment.isModifyingFiles, let song else { return }
         skipCompletedJobs = skipCompleted
         cueJobs = jobs
         let interval = range ?? 0...song.duration
@@ -822,7 +830,7 @@ final class Studio {
     }
 
     func startMCP() {
-        guard service == nil else { return }
+        guard service == nil, !modelEnvironment.cleaning else { return }
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let p = try Runtime.process("music_mcp", args: [root.path])
@@ -864,7 +872,7 @@ final class Studio {
     private func receive(_ line: String) {
         let response: [String: String]
         do {
-            guard !modelEnvironment.downloading else { throw StudioError.message("模型正在下载，请稍后再发起分析。") }
+            guard !modelEnvironment.isModifyingFiles else { throw StudioError.message("模型正在下载或清理，请稍后再发起分析。") }
             let request = try JSONDecoder().decode([String: String].self, from: Data(line.utf8))
             guard let path = request["path"] else { throw StudioError.message("缺少音频路径") }
             try open(URL(fileURLWithPath: path))
@@ -877,6 +885,21 @@ final class Studio {
         }
     }
     static let defaultJobs: [AnalysisJob] = [.acoustics, .structure, .rhythm, .harmony, .repetition, .events, .melody, .lyrics, .emotion]
+
+    func cleanEnvironment(_ scope: ModelCleanup) {
+        guard activeJob == nil else { return }
+        modelEnvironment.clean(scope) {
+            if let previous = self.service, previous.isRunning {
+                // Keep the process tracked until it exits so a retry still waits for it.
+                previous.terminate()
+                for _ in 0..<60 where previous.isRunning { try await Task.sleep(for: .milliseconds(50)) }
+                guard !previous.isRunning else { throw StudioError.message("MCP 服务仍在退出，请稍后重试。") }
+            }
+            self.stopService()
+            self.serviceStatus = "未启动"
+        }
+    }
+
     func chooseRuntime() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -888,13 +911,14 @@ final class Studio {
     }
     var mcpRunning: Bool { service != nil }
     func setMCPPort(_ port: Int) {
-        guard Self.portOverride == nil, port != mcpPort else { return }
+        guard !modelEnvironment.cleaning, Self.portOverride == nil, port != mcpPort else { return }
         UserDefaults.standard.set(port, forKey: "mcpPort")
         mcpPort = port
         restartMCP()
     }
     var mcpLog: URL { root.appendingPathComponent("mcp.log") }
     func restartMCP() {
+        guard !modelEnvironment.cleaning else { return }
         let previous = service
         stopService()
         Task {

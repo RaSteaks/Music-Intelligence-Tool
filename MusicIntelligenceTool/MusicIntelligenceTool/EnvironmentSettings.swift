@@ -2,6 +2,7 @@ import SwiftUI
 
 struct EnvironmentSettings: View {
     let studio: Studio
+    @State private var cleanupRequest: ModelCleanup?
     private var models: ModelEnvironment { studio.modelEnvironment }
 
     var body: some View {
@@ -71,10 +72,24 @@ struct EnvironmentSettings: View {
                     .padding(.vertical, 2)
                 }
             } header: {
-                HStack {
-                    Text("功能与模型")
-                    Spacer()
-                    Button("重新检查", action: models.refresh).disabled(models.isBusy)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("功能与模型")
+                        Spacer()
+                        Menu("清理") {
+                            Button("清理模型缓存…") { cleanupRequest = .models }
+                            Button("清理模型和运行环境…") { cleanupRequest = .modelsAndEnvironment }
+                        }
+                        .fixedSize()
+                        .disabled(models.isBusy || studio.activeJob != nil)
+                        Button("重新检查", action: models.refresh).disabled(models.isBusy)
+                    }
+                    if models.cleaning {
+                        ProgressView("正在清理…").controlSize(.small)
+                    }
+                    if let status = models.cleanupStatus {
+                        Text(status).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
                 }
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
@@ -89,6 +104,19 @@ struct EnvironmentSettings: View {
             }
         }
         .formStyle(.grouped)
+        .alert(cleanupRequest?.title ?? "清理", isPresented: Binding(
+            get: { cleanupRequest != nil }, set: { if !$0 { cleanupRequest = nil } }
+        ), presenting: cleanupRequest) { scope in
+            Button("移到废纸篓", role: .destructive) { studio.cleanEnvironment(scope) }
+            Button("取消", role: .cancel) { }
+        } message: { scope in
+            let shared = "将此 App 使用的模型缓存移到废纸篓。共用这些缓存的其他工具可能需要重新下载。歌曲和分析结果会保留。"
+            if scope == .modelsAndEnvironment {
+                Text("\(shared)\n\n这也会停止 MCP 服务，并移除当前运行目录中的 Python 虚拟环境和 Music2Emotion 安装。\n\(models.directory.path)")
+            } else {
+                Text(shared)
+            }
+        }
         .onAppear { models.checkIfNeeded() }
     }
 }

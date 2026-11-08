@@ -11,6 +11,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+import traceback
 from urllib.request import urlopen
 
 
@@ -31,7 +32,7 @@ def digest(path):
 def fetch(url, target, expected=None):
     """Publish complete files atomically so interrupted downloads aren't picked up by analysis."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".part", delete=False) as temp:
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.", suffix=".part", delete=False) as temp:
         partial = Path(temp.name)
     try:
         with urlopen(url, timeout=60) as source, partial.open("wb") as output:
@@ -278,5 +279,7 @@ if __name__ == "__main__":
                 result = inspect_feature(args.feature, args.runtime)
         emit(**result, python=platform.python_version())
     except Exception as exc:
+        # The MLX loaders wrap download and TLS errors. Keep their chained cause in the log.
+        traceback.print_exc()
         emit(error=str(exc) or type(exc).__name__)
         sys.exit(1)

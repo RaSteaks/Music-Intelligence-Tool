@@ -219,7 +219,7 @@ struct ContentView: View {
                         Button(job.title) { studio.run([job], range: studio.selection ?? studio.row.map { $0.start...$0.end }) }
                     }
                 } label: { Label("分析", systemImage: "waveform.badge.magnifyingglass") }
-                .disabled(studio.activeJob != nil || studio.modelEnvironment.downloading)
+                .disabled(studio.activeJob != nil || studio.modelEnvironment.isModifyingFiles)
                 Button("外部模型分析", systemImage: "sparkles") { showCloudAnalysis = true }
                     .disabled(studio.cloudRunning).accessibilityIdentifier("openCloudAnalysis")
                 Menu {
