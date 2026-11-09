@@ -14,7 +14,10 @@ struct ContentView: View {
     /// Frozen when the preview opens, so what is shown is exactly what is sent or copied,
     /// even if analysis saves a new revision or an MCP request switches songs meanwhile.
     @State private var handoffSnapshot: SongRecord?
-    @State private var copyReceipt: UUID?
+    /// A short confirmation shown in the toolbar after an action finishes, next to where it was started.
+    @State private var receipt: Receipt?
+    /// Analysis jobs seen during the current run, summarised when the run ends.
+    @State private var batchJobs: [AnalysisJob] = []
     @State private var isDropTargeted = false
     @AppStorage("rulerBars") private var rulerBars = false
     @AppStorage(CueEdge.entry.preference) private var inShortcut = CueEdge.entry.defaultKey
@@ -52,12 +55,8 @@ struct ContentView: View {
         .overlay {
             if isDropTargeted && page == .workspace { dropTarget }
         }
-        .onChange(of: studio.song?.trackID) { pan = 0; tab = "section"; copyReceipt = nil; studio.laneScroll = 0 }
-        .task(id: copyReceipt) {
-            guard copyReceipt != nil else { return }
-            try? await Task.sleep(for: .seconds(3))
-            if !Task.isCancelled { copyReceipt = nil }
-        }
+        .onChange(of: studio.song?.trackID) { pan = 0; tab = "section"; receipt = nil; studio.laneScroll = 0 }
+        .modifier(receiptObservers)
         .alert("音乐工作台", isPresented: Binding(get: { studio.notice != nil }, set: { if !$0 { studio.notice = nil } })) {
             Button("确定") { studio.notice = nil }
         } message: { Text(studio.notice ?? "") }
@@ -142,10 +141,7 @@ struct ContentView: View {
                 Text(progress).lineLimit(1)
                 Button("取消云端", action: studio.cancelCloud)
             }
-            if copyReceipt != nil {
-                Label("已复制，可粘贴给 agent", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            } else if let status = studio.agentSendStatus {
+            if let status = studio.agentSendStatus {
                 Text(status).lineLimit(1).help(status)
                     .accessibilityIdentifier("agentSendStatus")
                     .foregroundStyle(.secondary)
@@ -209,32 +205,102 @@ struct ContentView: View {
             .accessibilityIdentifier("pageSwitcher")
         }
         ToolbarItemGroup {
+            if let receipt {
+                ToolbarReceipt(receipt: receipt) { showStatus = true }
+            }
             Button("打开音频", systemImage: "folder") { page = .workspace; studio.chooseFile() }
                 .keyboardShortcut("o").accessibilityIdentifier("openAudio")
+                .help("打开音频文件（⌘O）")
             if page == .workspace, studio.song != nil {
-                Menu {
-                    Button("分析整首歌曲") { studio.run(Studio.defaultJobs) }
-                    Divider()
-                    ForEach(AnalysisJob.allCases) { job in
-                        Button(job.title) { studio.run([job], range: studio.selection ?? studio.row.map { $0.start...$0.end }) }
-                    }
-                } label: { Label("分析", systemImage: "waveform.badge.magnifyingglass") }
-                .disabled(studio.activeJob != nil || studio.modelEnvironment.isModifyingFiles)
-                Button("外部模型分析", systemImage: "sparkles") { showCloudAnalysis = true }
-                    .disabled(studio.cloudRunning).accessibilityIdentifier("openCloudAnalysis")
-                Menu {
-                    Button("发送给 Claude Code…") { handoffSnapshot = studio.song; showHandoff = handoffSnapshot != nil }
-                        .disabled(studio.sendingToAgent)
-                    Button("复制交接文本") { copyForAgent() }
-                    Divider()
-                    Button("导出 JSON…", action: studio.exportJSON)
-                } label: { Label("交给 agent", systemImage: "paperplane") }
-                .accessibilityIdentifier("handoffMenu")
-                Button("撤销", systemImage: "arrow.uturn.backward", action: studio.undo).disabled(!studio.canUndo)
-                    .keyboardShortcut("z")
-                Button("校对卡", systemImage: "sidebar.right") { inspector.toggle() }
+                // A running task replaces its button in place, so progress appears where it was started.
+                if let job = studio.activeJob {
+                    ToolbarActivity(title: "分析中 · " + job.title, detail: "正在分析：" + job.title,
+                                    cancelTitle: "取消分析", cancel: studio.cancel)
+                        .accessibilityIdentifier("analysisActivity")
+                } else {
+                    Menu {
+                        Button("分析整首歌曲") { studio.run(Studio.defaultJobs) }
+                        Divider()
+                        ForEach(AnalysisJob.allCases) { job in
+                            Button(job.title) { studio.run([job], range: studio.selection ?? studio.row.map { $0.start...$0.end }) }
+                        }
+                    } label: { Label("分析", systemImage: "waveform.badge.magnifyingglass") }
+                    .disabled(studio.modelEnvironment.isModifyingFiles)
+                    .accessibilityLabel("分析")
+                    .accessibilityIdentifier("analyzeMenu")
+                    .help(studio.modelEnvironment.isModifyingFiles ? "模型正在下载或清理，完成后才能分析"
+                          : "本地分析：整首歌曲，或只分析当前选区")
+                }
+                if studio.cloudRunning {
+                    ToolbarActivity(title: "外部模型分析中", detail: studio.cloudProgress ?? "外部模型分析中",
+                                    cancelTitle: "取消外部模型分析", cancel: studio.cancelCloud)
+                } else {
+                    Button("外部模型分析", systemImage: "sparkles") { showCloudAnalysis = true }
+                        .accessibilityIdentifier("openCloudAnalysis")
+                        .help("用已配置的外部模型分析选区或整首歌曲")
+                }
+                if studio.sendingToAgent {
+                    ToolbarActivity(title: "正在发送", detail: studio.agentSendStatus ?? "正在发送给 Claude Code…")
+                } else {
+                    Menu {
+                        Button("发送给 Claude Code…") { handoffSnapshot = studio.song; showHandoff = handoffSnapshot != nil }
+                        Button("复制交接文本") { copyForAgent() }
+                        Divider()
+                        Button("导出 JSON…") {
+                            if let url = studio.exportJSON() { confirm("已导出 " + url.lastPathComponent) }
+                        }
+                    } label: { Label("交给 agent", systemImage: "paperplane") }
+                    .accessibilityIdentifier("handoffMenu")
+                    .accessibilityLabel("交给 agent")
+                    .help("发送或复制分析记录给 agent，或导出 JSON")
+                }
+                Button("撤销", systemImage: "arrow.uturn.backward") {
+                    if studio.undo() { confirm("已撤销上一步编辑") }
+                }
+                .disabled(!studio.canUndo)
+                .keyboardShortcut("z")
+                .help(studio.canUndo ? "撤销上一步编辑（⌘Z）" : "没有可撤销的编辑")
+                Toggle(isOn: $inspector) { Label("校对卡", systemImage: "sidebar.right") }
+                    .toggleStyle(.button)
+                    .accessibilityIdentifier("inspectorToggle")
                     .help(inspector ? "隐藏校对卡" : "显示校对卡")
             }
+        }
+    }
+
+    /// Turns the end of a background task into a toolbar confirmation, and clears it after a few seconds.
+    private var receiptObservers: ReceiptObservers {
+        ReceiptObservers(studio: studio, receiptID: receipt?.id,
+                         clear: { receipt = nil },
+                         jobChanged: { job in
+                             if let job { if !batchJobs.contains(job) { batchJobs.append(job) } } else { summarizeAnalysis() }
+                         },
+                         cloudFinished: {
+                             confirm(studio.notice == nil ? "外部模型分析已结束" : "外部模型分析未完成", warning: studio.notice != nil)
+                         },
+                         sendFinished: {
+                             if let status = studio.agentSendStatus { confirm(status, warning: !status.contains("已读取")) }
+                         })
+    }
+
+    private func confirm(_ text: String, warning: Bool = false, opensStatus: Bool = false) {
+        receipt = Receipt(text: text, warning: warning, opensStatus: opensStatus)
+        AccessibilityNotification.Announcement(text).post()
+    }
+
+    /// One confirmation per run, however many jobs it contained.
+    private func summarizeAnalysis() {
+        guard !batchJobs.isEmpty else { return }
+        let jobs = batchJobs
+        batchJobs = []
+        let states = jobs.map { studio.song?.status[$0.rawValue] ?? "" }
+        let failed = states.filter { $0.hasPrefix("失败") }.count
+        if states.contains("已取消") {
+            confirm("已取消分析", warning: true)
+        } else if failed > 0 {
+            confirm("分析结束，\(failed) 项失败，点此查看", warning: true, opensStatus: true)
+        } else {
+            confirm(jobs.count == 1 ? jobs[0].title + " 分析完成" : "分析完成，共 \(jobs.count) 项")
         }
     }
 
@@ -259,13 +325,13 @@ struct ContentView: View {
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             if pasteboard.setString(message, forType: .string) {
-                copyReceipt = UUID()
+                confirm("已复制，可粘贴给 agent")
             } else {
-                copyReceipt = nil
+                receipt = nil
                 studio.notice = "写入剪贴板失败，请重试。"
             }
         } catch {
-            copyReceipt = nil
+            receipt = nil
             studio.notice = error.localizedDescription
         }
     }
@@ -343,5 +409,85 @@ private struct TimelineCanvas: View {
                      hiddenLanes: studio.hiddenLanes, laneScroll: studio.laneScroll, onLaneScroll: { studio.laneScroll = $0 })
             .accessibilityIdentifier("waveform")
             .help("在顶部时间尺点击或拖动可定位播放头；在波形上拖动可设置出入点。")
+    }
+}
+
+private struct ReceiptObservers: ViewModifier {
+    let studio: Studio
+    let receiptID: UUID?
+    let clear: () -> Void
+    let jobChanged: (AnalysisJob?) -> Void
+    let cloudFinished: () -> Void
+    let sendFinished: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .task(id: receiptID) {
+                guard receiptID != nil else { return }
+                try? await Task.sleep(for: .seconds(4))
+                if !Task.isCancelled { clear() }
+            }
+            .onChange(of: studio.activeJob) { _, job in jobChanged(job) }
+            .onChange(of: studio.cloudRunning) { was, running in if was && !running { cloudFinished() } }
+            .onChange(of: studio.sendingToAgent) { was, sending in if was && !sending { sendFinished() } }
+    }
+}
+
+struct Receipt: Equatable {
+    let id = UUID()
+    let text: String
+    var warning = false
+    var opensStatus = false
+}
+
+/// Spinner, short title and an optional cancel button that stand in for a toolbar button while its task runs.
+private struct ToolbarActivity: View {
+    let title: String
+    let detail: String
+    var cancelTitle: String?
+    var cancel: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(title).font(.callout).lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: 170, alignment: .leading)
+            if let cancel, let cancelTitle {
+                Button(cancelTitle, systemImage: "xmark.circle.fill", action: cancel)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help(cancelTitle)
+            }
+        }
+        .padding(.horizontal, 6)
+        .help(detail)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(detail)
+    }
+}
+
+/// The result of the last action, held for a few seconds. A warning that has details opens the status panel.
+private struct ToolbarReceipt: View {
+    let receipt: Receipt
+    let openStatus: () -> Void
+
+    var body: some View {
+        let content = HStack(spacing: 5) {
+            Image(systemName: receipt.warning ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(receipt.warning ? Color.orange : Tone.sound.color)
+            Text(receipt.text).lineLimit(1).truncationMode(.tail).frame(maxWidth: 240, alignment: .leading)
+        }
+        .font(.callout)
+        .padding(.horizontal, 6)
+        .help(receipt.text)
+        Group {
+            if receipt.opensStatus {
+                Button(action: openStatus) { content }.buttonStyle(.plain)
+            } else {
+                content
+            }
+        }
+        .accessibilityIdentifier("toolbarReceipt")
     }
 }

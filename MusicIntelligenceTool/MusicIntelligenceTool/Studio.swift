@@ -351,8 +351,9 @@ final class Studio {
             song = current
         } catch { notice = error.localizedDescription }
     }
-    func undo() {
-        guard let entry = history.last, var current = song else { return }
+    /// Returns whether an edit was actually undone, so the caller can confirm it.
+    @discardableResult func undo() -> Bool {
+        guard let entry = history.last, var current = song else { return false }
         current.marks.removeAll { entry.affected.contains($0.id) }
         current.marks += entry.prior
         do {
@@ -360,7 +361,8 @@ final class Studio {
             history.removeLast()
             song = current
             if row == nil { selected = current.sections.first?.id }
-        } catch { notice = error.localizedDescription }
+            return true
+        } catch { notice = error.localizedDescription; return false }
     }
     func select(_ mark: Mark) { selected = mark.id; seek(mark.start) }
 
@@ -440,17 +442,19 @@ final class Studio {
         }
     }
 
-    func exportJSON() {
-        guard let song else { return }
+    /// Returns the written file, or nil when cancelled or failed (failures raise a notice).
+    @discardableResult func exportJSON() -> URL? {
+        guard let song else { return nil }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = URL(fileURLWithPath: song.path).deletingPathExtension().lastPathComponent + ".analysis.json"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
             try encoder.encode(song).write(to: url, options: .atomic)
-        } catch { notice = error.localizedDescription }
+            return url
+        } catch { notice = error.localizedDescription; return nil }
     }
 
     func run(_ jobs: [AnalysisJob], range: ClosedRange<Double>? = nil, skipCompleted: Bool = false) {
