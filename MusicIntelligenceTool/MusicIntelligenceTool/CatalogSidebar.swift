@@ -26,10 +26,13 @@ struct CatalogCategory: Identifiable {
     static func title(_ id: String) -> String { all.first { $0.id == id }?.title ?? id }
 
     static func items(_ tab: String, in song: SongRecord) -> [Mark] {
-        song.marks.filter { row in
+        // Comparison findings are the same records shown in the insight list, not copies.
+        let comparisonRuns = Set((song.cloudBatches ?? []).filter { $0.mode == "models" }.flatMap(\.runIDs))
+        return song.marks.filter { row in
             row.kind == tab || (tab == "chord" && ["key", "key_region", "modulation"].contains(row.kind)) ||
             (tab == "rhythm" && ["rhythm_summary", "tempo"].contains(row.kind)) ||
             (tab == "melody" && ["melody_summary", "melody_note", "melody_phrase", "melody_motif"].contains(row.kind)) ||
+            (tab == "models" && row.fields["label"]?.origin.map { comparisonRuns.contains($0.runID) } == true) ||
             (tab == "event" && row.kind == "insight" && row.fields["category"]?.value == "event")
         }.sorted { $0.start < $1.start }
     }
@@ -77,12 +80,14 @@ struct CatalogSidebar: View {
                     .background(tab == category.id ? Tone.sound.color.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 5))
                     .accessibilityAddTraits(tab == category.id ? .isSelected : [])
                     .accessibilityValue(progressDescription(category.id))
+                    .accessibilityIdentifier("catalogCategory-\(category.id)")
                 }
             }
             Section(CatalogCategory.title(tab)) {
                 if tab == "models" {
                     Text("对照结果显示在时间轴下方。").font(.caption).foregroundStyle(.secondary)
-                } else if items.isEmpty {
+                }
+                if items.isEmpty {
                     Text(CatalogCategory.authored.contains(tab) ? "还没有记录。用走带条上的按钮添加。" : "这一类还没有分析结果。")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
@@ -90,18 +95,26 @@ struct CatalogSidebar: View {
                         itemRow(item)
                             .tag(item.id)
                             .contextMenu {
-                                if item.kind == "section" {
-                                    Button("删除分段", role: .destructive) { studio.deleteSection(item.id) }
-                                        .disabled(items.count < 2)
+                                Button("定位并校对", systemImage: "scope") { studio.select(item) }
+                                Button("循环试听", systemImage: "repeat") {
+                                    studio.select(item)
+                                    studio.selection = item.start...item.end
+                                    studio.loop = true
+                                    if !studio.playing { studio.togglePlayback() }
                                 }
+                                .disabled(item.end <= item.start)
+                                Divider()
+                                Button(item.kind == "section" ? "删除分段" : "删除\(ReviewCard.kindTitles[item.kind] ?? "条目")",
+                                       systemImage: "trash", role: .destructive) { studio.deleteMark(item.id) }
+                                    .disabled(item.kind == "section" && song.sections.count < 2)
                             }
                     }
                 }
             }
         }
         .listStyle(.sidebar)
-        .onDeleteCommand(perform: tab == "section" && items.count > 1 && studio.row?.kind == "section" ? {
-            if let id = studio.selected { studio.deleteSection(id) }
+        .onDeleteCommand(perform: items.contains(where: { $0.id == studio.selected && ($0.kind != "section" || song.sections.count > 1) }) ? {
+            if let id = studio.selected { studio.deleteMark(id) }
         } : nil)
     }
 
@@ -145,7 +158,10 @@ struct CatalogSidebar: View {
                 .opacity(state == .stale ? 0.6 : 1)
                 .lineLimit(1)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("catalogItem-\(item.id)")
     }
 }
 

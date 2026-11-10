@@ -372,6 +372,22 @@ final class Studio {
         if selected == id, row == nil { selected = neighbour }
     }
 
+    func deleteMark(_ id: String) {
+        guard let mark = song?.marks.first(where: { $0.id == id }) else { return }
+        if mark.kind == "section" {
+            deleteSection(id)
+            return
+        }
+        edit { doc in
+            doc.marks.removeAll { $0.id == id }
+            if mark.kind == "lyric" {
+                // Word alignment belongs to the removed text and must share its undo entry.
+                doc.invalidateWords(from: mark.start, to: mark.end)
+            }
+        }
+        if selected == id, row == nil { selected = nil }
+    }
+
     func add(_ kind: String) {
         let a = inPoint ?? outPoint ?? position
         let b = outPoint ?? a

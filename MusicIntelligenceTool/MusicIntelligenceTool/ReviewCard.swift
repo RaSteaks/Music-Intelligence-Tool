@@ -231,7 +231,7 @@ struct ReviewCard: View {
                         .help("时间并入前一段；删除首段时并入后一段。至少保留一段。")
                 }
                 if row.kind == "note" {
-                    Button("删除注释", role: .destructive) { studio.edit { $0.marks.removeAll { $0.id == row.id } } }
+                    Button("删除注释", role: .destructive) { studio.deleteMark(row.id) }
                 }
             }
             .controlSize(.small)

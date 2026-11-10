@@ -81,6 +81,85 @@ struct MusicIntelligenceToolTests {
         #expect(metrics["mean_short_lufs"] == -15 && metrics["coverage_short_lufs"] == 0.4)
     }
 
+    @Test func deletingLyricsRemovesOnlyTargetAndItsWordsAndCanBeUndone() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let studio = Studio(root: root)
+        let audio = try #require(Bundle.main.url(forResource: "Study", withExtension: "wav"))
+        try studio.open(audio)
+        let lyric = Mark.manual("lyric", from: 2, to: 4, label: "删除这一句")
+        let other = Mark.manual("lyric", from: 4, to: 6, label: "保留这一句")
+        let word = Mark(kind: "word", start: 2, end: 3, source: "WhisperX")
+        let otherWord = Mark(kind: "word", start: 4, end: 5, source: "WhisperX")
+        studio.edit { $0.marks += [lyric, other, word, otherWord] }
+        let original = try #require(studio.song).marks
+        studio.select(other)
+        studio.deleteMark(lyric.id)
+        #expect(studio.selected == other.id)
+        #expect(studio.song?.marks == original.filter { $0.id != lyric.id && $0.id != word.id })
+        #expect(studio.song?.status["alignment"] == "待更新")
+        #expect(studio.undo())
+        #expect(studio.song?.marks.sorted { $0.id < $1.id } == original.sorted { $0.id < $1.id })
+
+        studio.select(lyric)
+        studio.deleteMark(lyric.id)
+        #expect(studio.selected == nil)
+        let revision = studio.song?.revision
+        studio.deleteMark(lyric.id)
+        studio.deleteMark("missing")
+        #expect(studio.song?.revision == revision)
+        try studio.open(audio)
+        #expect(studio.song?.marks.contains { $0.id == lyric.id || $0.id == word.id } == false)
+        #expect(studio.song?.marks.contains { $0.id == other.id } == true)
+
+        studio.add("lyric")
+        let emptyID = try #require(studio.selected)
+        studio.deleteMark(emptyID)
+        #expect(studio.song?.marks.contains { $0.id == emptyID } == false)
+        #expect(studio.undo())
+        #expect(studio.song?.marks.contains { $0.id == emptyID } == true)
+    }
+
+    @Test func catalogDeletionSupportsAllRecordKindsAndSharedCategories() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let studio = Studio(root: root)
+        let audio = try #require(Bundle.main.url(forResource: "Study", withExtension: "wav"))
+        try studio.open(audio)
+        let kinds = ["note", "emotion", "chord", "key", "key_region", "modulation", "insight", "loudness", "event",
+                     "rhythm_summary", "tempo", "repetition", "melody_summary", "melody_note", "melody_phrase", "melody_motif"]
+        let records = kinds.map { Mark(kind: $0, start: 2, end: 4, source: "fixture") }
+        let eventInsight = Mark(kind: "insight", start: 5, end: 6, source: "fixture",
+                                fields: ["category": ReviewedText(suggested: "event")])
+        let comparison = Mark(kind: "insight", start: 7, end: 8, source: "fixture",
+                              fields: ["label": ReviewedText(suggested: "模型结论", origin: SuggestionOrigin(
+                                runID: "comparison", provider: "fixture", model: "fixture", evidenceIDs: [], uncertainty: ""))])
+        studio.edit {
+            $0.marks += records + [eventInsight, comparison]
+            $0.cloudBatches = [CloudBatch(ranges: [AnalysisRange(start: 7, end: 8)], audioSources: [],
+                                         maximumRequests: 2, runIDs: ["comparison"], mode: "models")]
+        }
+        let original = try #require(studio.song).marks
+        for mark in records + [eventInsight, comparison] {
+            let song = try #require(studio.song)
+            #expect(CatalogCategory.all.contains { CatalogCategory.items($0.id, in: song).contains { $0.id == mark.id } })
+            studio.select(mark)
+            studio.deleteMark(mark.id)
+            #expect(studio.selected == nil)
+            #expect(studio.song?.marks.sorted { $0.id < $1.id } == original.filter { $0.id != mark.id }.sorted { $0.id < $1.id })
+            #expect(studio.undo())
+            #expect(studio.song?.marks.sorted { $0.id < $1.id } == original.sorted { $0.id < $1.id })
+        }
+        studio.deleteMark(eventInsight.id)
+        studio.deleteMark(comparison.id)
+        try studio.open(audio)
+        let saved = try #require(studio.song)
+        #expect(!CatalogCategory.items("event", in: saved).contains { $0.id == eventInsight.id })
+        #expect(!CatalogCategory.items("insight", in: saved).contains { $0.id == eventInsight.id || $0.id == comparison.id })
+        #expect(CatalogCategory.items("models", in: saved).isEmpty)
+        #expect(saved.cloudBatches?.first?.runIDs == ["comparison"])
+    }
+
     @Test func deletingSectionsPreservesCoverageAndCanBeUndone() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -93,20 +172,20 @@ struct MusicIntelligenceToolTests {
         let last = try #require(original.last)
 
         studio.select(middle)
-        studio.deleteSection(middle.id)
+        studio.deleteMark(middle.id)
         #expect(studio.selected == first.id)
         #expect(studio.song?.sections.map(\.id) == [first.id, last.id])
         #expect(studio.song?.sections.first?.end == last.start)
         studio.undo()
         #expect(studio.song?.sections == original)
 
-        studio.deleteSection(first.id)
+        studio.deleteMark(first.id)
         #expect(studio.song?.sections.first?.start == first.start)
         #expect(studio.song?.sections.first?.fields == middle.fields)
-        studio.deleteSection(last.id)
+        studio.deleteMark(last.id)
         #expect(studio.song?.sections.last?.end == last.end)
         let revision = studio.song?.revision
-        studio.deleteSection(middle.id)
+        studio.deleteMark(middle.id)
         #expect(studio.song?.sections.map(\.id) == [middle.id])
         #expect(studio.song?.revision == revision)
     }
