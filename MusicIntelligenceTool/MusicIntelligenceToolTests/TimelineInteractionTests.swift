@@ -29,10 +29,17 @@ struct TimelineInteractionTests {
         var lyric = Mark.manual("lyric", from: 0, to: 1, label: "")
         #expect(lyric.provenance == .empty && lyric.fields["label"]?.provenance == .empty)
         #expect(lyric.fields["label"]?.confirmed == nil && lyric.label == "")
+        #expect(lyric.reviewed && lyric.reviewStatus == .unfilled)
+        lyric.fields["label"]?.suggested = "候选唱词"
+        lyric.fields["label"]?.hint = "再听一次"
+        #expect(lyric.reviewStatus == .edited && lyric.reviewStatus.needsReview)
         lyric.fields["label"]?.confirmed = "词"
-        #expect(lyric.provenance == .confirmed)
+        #expect(lyric.provenance == .confirmed && lyric.reviewStatus == .confirmed)
         lyric.fields["label"]?.confirmed = ""
         #expect(lyric.provenance == .cleared && lyric.fields["label"]?.provenance == .cleared)
+        #expect(lyric.reviewStatus == .unfilled)
+        lyric.fields["vocal_state"] = ReviewedText(confirmed: "纯器乐")
+        #expect(lyric.reviewStatus == .confirmed)
     }
 
     @Test func cuePointsBuildSectionsAndSupportCorrections() throws {
@@ -98,6 +105,11 @@ struct TimelineInteractionTests {
         #expect(studio.cursor == 45)
         #expect(studio.selection == 5...15)
         #expect(studio.selected == selected)
+        studio.audition(22...28)
+        #expect(studio.selection == 5...15 && studio.analysisScope?.source == .selection)
+        #expect(studio.loopRange == 22...28 && studio.cursor == 22)
+        studio.select(try #require(studio.row))
+        #expect(studio.auditionRange == nil && studio.selection == 5...15 && !studio.loop)
         // The same workspace supports zoomed scrubbing, range selection and handle edits.
         studio.selection = nil
         let zoomed = try makeCanvas(studio, window: 10...20)

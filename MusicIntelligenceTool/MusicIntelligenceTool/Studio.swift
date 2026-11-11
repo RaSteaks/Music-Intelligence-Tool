@@ -58,6 +58,14 @@ struct RecentTrack: Codable, Equatable, Identifiable {
     var title: String { URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent }
 }
 
+struct LocalAnalysisResult: Identifiable {
+    let id = UUID()
+    let jobs: [AnalysisJob]
+    let states: [AnalysisJob: String]
+    let range: ClosedRange<Double>
+    let cancelled: Bool
+}
+
 @MainActor @Observable
 final class Studio {
     static let audioContentTypes = ["wav", "mp3", "flac", "m4a"].compactMap { UTType(filenameExtension: $0) }
@@ -74,6 +82,7 @@ final class Studio {
             return inPoint...outPoint
         }
         set {
+            clearAudition()
             inPoint = newValue?.lowerBound
             outPoint = newValue?.upperBound
         }
@@ -81,7 +90,10 @@ final class Studio {
     var peaks: [Float] = []
     var zoom = 1.0
     var snap = true
-    var loop = false
+    var loop = false {
+        didSet { if !loop { auditionRange = nil } }
+    }
+    private(set) var auditionRange: ClosedRange<Double>?
     var cursor = 0.0
     var playing = false
     var stem = "原曲"
@@ -105,8 +117,13 @@ final class Studio {
     private(set) var mcpPort = portOverride ?? (UserDefaults.standard.object(forKey: "mcpPort") as? Int) ?? defaultMCPPort
     var mcpEndpoint: String { "http://127.0.0.1:\(mcpPort)/mcp" }
     var activeJob: AnalysisJob?
+    private(set) var activeAnalysisRange: ClosedRange<Double>?
+    private(set) var lastAnalysisResult: LocalAnalysisResult?
     var cueJobs: [AnalysisJob] = []
     private var skipCompletedJobs = false
+    private var startedJobs: [AnalysisJob] = []
+    private var analysisStates: [AnalysisJob: String] = [:]
+    private var requestedAnalysisRange: ClosedRange<Double>?
     private var player: AVAudioPlayer?
     private var worker: Process?
     private var service: Process?
@@ -206,6 +223,7 @@ final class Studio {
         // The agent can still read the previous snapshot, but it no longer owns this workspace's status.
         agentSendID = nil
         agentSendStatus = nil
+        lastAnalysisResult = nil
         completedComparisonID = nil
         selected = record.sections.first?.id
         playing = false
@@ -248,9 +266,9 @@ final class Studio {
         return try? JSONDecoder().decode(SongRecord.self, from: Data(contentsOf: file))
     }
 
-    func openStudy() {
-        guard let url = Bundle.main.url(forResource: "Study", withExtension: "wav") else { return }
-        do { try open(url) } catch { notice = error.localizedDescription }
+    @discardableResult func openStudy() -> Bool {
+        guard let url = Bundle.main.url(forResource: "Study", withExtension: "wav") else { return false }
+        do { try open(url); return true } catch { notice = error.localizedDescription; return false }
     }
 
     nonisolated static func waveform(_ url: URL) throws -> [Float] {
@@ -292,6 +310,7 @@ final class Studio {
     }
     func setPoint(_ edge: CueEdge, at time: Double) {
         guard let song else { return }
+        clearAudition()
         let t = min(song.duration, max(0, time))
         // Handle edits preserve the opposite endpoint unless it would invert the range.
         switch edge {
@@ -312,7 +331,22 @@ final class Studio {
             playing = player.play()
         }
     }
-    var loopRange: ClosedRange<Double>? { selection ?? row.map { $0.start...$0.end } }
+    var loopRange: ClosedRange<Double>? { auditionRange ?? selection ?? row?.timeRange }
+
+    /// Listening to an item must not replace the cue points used by editing and analysis.
+    func audition(_ range: ClosedRange<Double>) {
+        guard range.lowerBound < range.upperBound else { return }
+        auditionRange = range
+        loop = true
+        seek(range.lowerBound)
+        if !playing { togglePlayback() }
+    }
+
+    private func clearAudition(pause: Bool = false) {
+        guard auditionRange != nil else { return }
+        loop = false
+        if pause && playing { togglePlayback() }
+    }
     func tick() {
         guard playing, let player else { return }
         if loop, let r = loopRange, r.upperBound > r.lowerBound,
@@ -332,11 +366,12 @@ final class Studio {
         } catch { notice = error.localizedDescription }
     }
 
-    func edit(_ change: (inout SongRecord) -> Void) {
-        guard var current = song else { return }
+    /// A no-op is safe to continue from, but a failed save must leave any draft open.
+    @discardableResult func edit(_ change: (inout SongRecord) -> Void) -> Bool {
+        guard var current = song else { return false }
         let old = current.marks
         change(&current)
-        guard old != current.marks else { return }
+        guard old != current.marks else { return true }
         let previous = Dictionary(uniqueKeysWithValues: old.map { ($0.id, $0) })
         let updated = Dictionary(uniqueKeysWithValues: current.marks.map { ($0.id, $0) })
         let changed = Set(previous.keys).union(updated.keys).filter { previous[$0] != updated[$0] }
@@ -349,7 +384,8 @@ final class Studio {
             try current.save(in: root)
             history.append((old.filter { changed.contains($0.id) }, Set(changed)))
             song = current
-        } catch { notice = error.localizedDescription }
+            return true
+        } catch { notice = error.localizedDescription; return false }
     }
     /// Returns whether an edit was actually undone, so the caller can confirm it.
     @discardableResult func undo() -> Bool {
@@ -364,12 +400,21 @@ final class Studio {
             return true
         } catch { notice = error.localizedDescription; return false }
     }
-    func select(_ mark: Mark) { selected = mark.id; seek(mark.start) }
+    func select(_ mark: Mark) {
+        clearAudition(pause: true)
+        selected = mark.id
+        seek(mark.start)
+    }
+
+    func deselect() {
+        clearAudition(pause: true)
+        selected = nil
+    }
 
     func deleteSection(_ id: String) {
         var neighbour: String?
         edit { neighbour = $0.deleteSection(id) }
-        if selected == id, row == nil { selected = neighbour }
+        if selected == id, row == nil { clearAudition(pause: true); selected = neighbour }
     }
 
     func deleteMark(_ id: String) {
@@ -385,25 +430,27 @@ final class Studio {
                 doc.invalidateWords(from: mark.start, to: mark.end)
             }
         }
-        if selected == id, row == nil { selected = nil }
+        if selected == id, row == nil { deselect() }
     }
 
-    func add(_ kind: String) {
-        let a = inPoint ?? outPoint ?? position
-        let b = outPoint ?? a
+    @discardableResult func add(_ kind: String, in range: ClosedRange<Double>? = nil, label: String = "") -> Bool {
+        let a = range?.lowerBound ?? inPoint ?? outPoint ?? position
+        let b = range?.upperBound ?? outPoint ?? a
         if kind == "section" {
-            edit { doc in
+            guard edit({ doc in
                 for t in [a, b] {
                     if let part = doc.sections.first(where: { $0.start < t && t < $0.end }) { doc.split(part.id, at: t) }
                 }
-            }
+            }) else { return false }
             selected = song?.sections.first(where: { $0.start == a })?.id
         } else {
-            let row = Mark.manual(kind, from: a, to: b, label: kind == "lyric" ? "" : "新注释")
-            edit { $0.marks.append(row) }
+            let row = Mark.manual(kind, from: a, to: b, label: label)
+            guard edit({ $0.marks.append(row) }) else { return false }
+            clearAudition(pause: true)
             selected = row.id
             visibleKinds.insert(kind)
         }
+        return true
     }
     /// Sends `snapshot` when given (the revision the handoff preview showed), otherwise the current song.
     func sendToAgent(_ snapshot: SongRecord? = nil) async {
@@ -459,8 +506,8 @@ final class Studio {
     }
 
     /// Returns the written file, or nil when cancelled or failed (failures raise a notice).
-    @discardableResult func exportJSON() -> URL? {
-        guard let song else { return nil }
+    @discardableResult func exportJSON(_ snapshot: SongRecord? = nil) -> URL? {
+        guard let song = snapshot ?? song else { return nil }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = URL(fileURLWithPath: song.path).deletingPathExtension().lastPathComponent + ".analysis.json"
@@ -474,15 +521,19 @@ final class Studio {
     }
 
     func run(_ jobs: [AnalysisJob], range: ClosedRange<Double>? = nil, skipCompleted: Bool = false) {
-        guard activeJob == nil, !modelEnvironment.isModifyingFiles, let song else { return }
+        guard !jobs.isEmpty, activeJob == nil, !modelEnvironment.isModifyingFiles, let song else { return }
         skipCompletedJobs = skipCompleted
+        lastAnalysisResult = nil
+        startedJobs = []
+        analysisStates = [:]
         cueJobs = jobs
         let interval = range ?? 0...song.duration
+        requestedAnalysisRange = interval
         launchNext(interval)
     }
 
     private func launchNext(_ interval: ClosedRange<Double>) {
-        guard !cueJobs.isEmpty, var doc = song else { activeJob = nil; return }
+        guard !cueJobs.isEmpty, var doc = song else { finishAnalysis(); return }
         let job = cueJobs.removeFirst()
         let bounds = job.requiresWholeTrack ? 0...doc.duration : interval
         // MCP checks completion when a job reaches the front: a successful
@@ -492,6 +543,8 @@ final class Studio {
             launchNext(interval); return
         }
         activeJob = job
+        activeAnalysisRange = bounds
+        startedJobs.append(job)
         let dir = root.appendingPathComponent(doc.trackID)
         let runID = UUID().uuidString
         let out = dir.appendingPathComponent(runID+".json")
@@ -535,7 +588,7 @@ final class Studio {
                             }
                         }
                     } catch { current.status[job.rawValue] = "失败 · " + error.localizedDescription }
-                    self.persist(current)
+                    self.persistAnalysis(current, job: job)
                 }
             }
             doc.status[job.rawValue] = "分析中"
@@ -546,13 +599,32 @@ final class Studio {
         } catch {
             worker = nil
             doc.status[job.rawValue] = "失败 · " + error.localizedDescription
-            persist(doc)
+            persistAnalysis(doc, job: job)
             launchNext(interval)
         }
     }
-    private func persist(_ doc: SongRecord) {
+
+    private func finishAnalysis(cancelled: Bool = false) {
+        if let range = requestedAnalysisRange, let song, !startedJobs.isEmpty {
+            let actualRange = startedJobs.allSatisfy(\.requiresWholeTrack) ? 0...song.duration : range
+            lastAnalysisResult = LocalAnalysisResult(jobs: startedJobs, states: analysisStates, range: actualRange, cancelled: cancelled)
+        }
+        startedJobs = []
+        analysisStates = [:]
+        requestedAnalysisRange = nil
+        activeAnalysisRange = nil
+        activeJob = nil
+    }
+    private func persistAnalysis(_ doc: SongRecord, job: AnalysisJob) {
         var updated = doc
-        do { try updated.save(in: root); song = updated } catch { notice = error.localizedDescription }
+        do {
+            try updated.save(in: root)
+            song = updated
+            analysisStates[job] = updated.status[job.rawValue]
+        } catch {
+            analysisStates[job] = "未保存结果"
+            notice = error.localizedDescription
+        }
     }
 
     func startCloud(connectionID: String, task: CloudTaskKind, range: AnalysisRange, force: Bool = false,
@@ -845,8 +917,11 @@ final class Studio {
         let process = worker
         worker = nil
         if process?.isRunning == true { process?.terminate() }
-        if var current = song, let job = activeJob { current.status[job.rawValue] = "已取消"; persist(current) }
-        activeJob = nil
+        if var current = song, let job = activeJob {
+            current.status[job.rawValue] = "已取消"
+            persistAnalysis(current, job: job)
+        }
+        finishAnalysis(cancelled: true)
     }
 
     func startMCP() {
@@ -920,13 +995,14 @@ final class Studio {
         }
     }
 
-    func chooseRuntime() {
+    func chooseRuntime(checking features: [ModelFeature] = ModelFeature.allCases) {
+        guard !modelEnvironment.isBusy, activeJob == nil else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         UserDefaults.standard.set(url.path, forKey: "runtime")
-        modelEnvironment.checkIfNeeded(in: Runtime.root)
+        modelEnvironment.checkIfNeeded(in: Runtime.root, features: features)
         restartMCP()
     }
     var mcpRunning: Bool { service != nil }

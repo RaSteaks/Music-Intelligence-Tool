@@ -1,10 +1,18 @@
 import SwiftUI
 
+enum ReviewEditor: Equatable {
+    case value(String), hint(String)
+}
+
 /// The inspector for one mark. All fields are visible at once, each drawn with its review state.
 struct ReviewCard: View {
     let studio: Studio
     let song: SongRecord
     let row: Mark
+    @Binding var editor: ReviewEditor?
+    @Binding var timeDraft: Bool
+    let onAdvance: (() -> Void)?
+    let onSelect: (Mark) -> Void
     @State private var startText = ""
     @State private var endText = ""
 
@@ -47,6 +55,16 @@ struct ReviewCard: View {
                     Button("应用") { applyTimes() }.accessibilityIdentifier("applyRange")
                 }
                 .controlSize(.small)
+                .onExitCommand(perform: loadTimes)
+                if timeDraft {
+                    Button("还原起止时间", action: loadTimes).buttonStyle(.link).font(.caption)
+                }
+            }
+            if row.kind == "section" {
+                SegmentOverview(song: song, section: row, onSelect: onSelect)
+            } else if let section = song.sections.first(where: { $0.start <= row.start && row.start < $0.end }) {
+                Button("查看所属段落", systemImage: "rectangle.split.3x1") { onSelect(section) }
+                    .buttonStyle(.link).font(.caption)
             }
             listening
             if row.analysisStale == true {
@@ -57,7 +75,7 @@ struct ReviewCard: View {
             let confirmed = fieldKeys.filter { row.fields[$0]?.confirmed != nil }.count
             Text("\(fieldKeys.count) 个字段中 \(confirmed) 个已确认").font(.caption).foregroundStyle(.secondary)
             ForEach(fieldKeys, id: \.self) { key in
-                FieldRow(studio: studio, row: row, key: key, title: fieldTitle(key))
+                FieldRow(studio: studio, row: row, key: key, title: fieldTitle(key), editor: $editor, onAdvance: onAdvance)
             }
             if row.kind == "lyric" { vocalState }
             if ["emotion", "section"].contains(row.kind), hasEmotionWindows {
@@ -65,16 +83,14 @@ struct ReviewCard: View {
             }
             evidence
             metrics
-            if row.kind == "section" {
-                let summary = song.summary(for: row)
-                if !summary.isEmpty { Text(summary).font(.callout).foregroundStyle(.secondary).textSelection(.enabled) }
-            }
             structural
         }
         .textFieldStyle(.roundedBorder)
         .onAppear(perform: loadTimes)
         .onChange(of: row.start, loadTimes)
         .onChange(of: row.end, loadTimes)
+        .onChange(of: startText) { updateTimeDraft() }
+        .onChange(of: endText) { updateTimeDraft() }
     }
 
     private var header: some View {
@@ -82,8 +98,7 @@ struct ReviewCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(Self.kindTitles[row.kind] ?? row.kind).font(.headline)
                 Spacer()
-                Button("循环试听", systemImage: "repeat") { loop(row.start...row.end) }
-                    .controlSize(.small)
+                Text(row.reviewStatus.title).font(.caption).foregroundStyle(.secondary)
             }
             HStack(spacing: 4) {
                 Text(clockText(row.start))
@@ -96,13 +111,13 @@ struct ReviewCard: View {
 
     @ViewBuilder private var listening: some View {
         if ["repetition", "melody_motif"].contains(row.kind), let start = row.metrics["reference_start_s"], let end = row.metrics["reference_end_s"] {
-            Button("循环试听参考片段") { loop(start...end) }.controlSize(.small)
+            Button("循环试听参考片段") { studio.audition(start...end) }.controlSize(.small)
         }
         if row.kind == "event", let source = row.fields["event_type"]?.value, song.stems[source] != nil {
-            Button("试听对应分轨") { studio.chooseStem(source); loop(row.start...row.end) }.controlSize(.small)
+            Button("试听对应分轨") { studio.chooseStem(source); studio.audition(row.timeRange) }.controlSize(.small)
         }
         if let source = row.fields["audio_source"]?.value {
-            Button("试听分析音轨") { studio.chooseStem(source == "original" ? "原曲" : source); loop(row.start...row.end) }
+            Button("试听分析音轨") { studio.chooseStem(source == "original" ? "原曲" : source); studio.audition(row.timeRange) }
                 .controlSize(.small)
         }
     }
@@ -238,22 +253,19 @@ struct ReviewCard: View {
         }
     }
 
-    private func loop(_ range: ClosedRange<Double>) {
-        studio.selection = range
-        studio.seek(range.lowerBound)
-        studio.loop = true
-        if !studio.playing { studio.togglePlayback() }
-    }
     private func loadTimes() {
         startText = String(format: "%.3f", row.start)
         endText = String(format: "%.3f", row.end)
+    }
+    private func updateTimeDraft() {
+        timeDraft = startText != String(format: "%.3f", row.start) || endText != String(format: "%.3f", row.end)
     }
     private func applyTimes() {
         guard let a = Double(startText), let b = Double(endText),
               a >= 0, b <= song.duration, row.kind == "note" ? a <= b : a < b else {
             studio.notice = "请输入歌曲时长内的有效起止时间。"; return
         }
-        studio.edit { doc in
+        let saved = studio.edit { doc in
             guard let i = doc.marks.firstIndex(where: { $0.id == row.id }) else { return }
             if row.kind == "section" {
                 if let previous = doc.sections.last(where: { $0.end == row.start }), a != row.start {
@@ -265,6 +277,11 @@ struct ReviewCard: View {
                 doc.marks[i].startConfirmed = true; doc.marks[i].endConfirmed = true
                 if row.kind == "lyric" { doc.invalidateWords(from: min(a,row.start), to: max(b,row.end)) }
             }
+        }
+        if saved, let updated = studio.row {
+            startText = String(format: "%.3f", updated.start)
+            endText = String(format: "%.3f", updated.end)
+            timeDraft = false
         }
     }
 
@@ -312,14 +329,16 @@ private struct FieldRow: View {
     let row: Mark
     let key: String
     let title: String
-    @State private var editing = false
+    @Binding var editor: ReviewEditor?
+    let onAdvance: (() -> Void)?
     @State private var draft = ""
-    @State private var editingHint = false
     @State private var hintDraft = ""
     @FocusState private var focus: Focus?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var field: ReviewedText { row.fields[key] ?? ReviewedText() }
+    private var editing: Bool { editor == .value(key) }
+    private var editingHint: Bool { editor == .hint(key) }
 
     var body: some View {
         let state = field.provenance
@@ -333,12 +352,17 @@ private struct FieldRow: View {
                 TextField("校对后的内容", text: $draft, axis: .vertical)
                     .lineLimit(1...5)
                     .focused($focus, equals: .value)
-                    .onSubmit(commit)
-                    .onExitCommand { editing = false }
+                    .onSubmit { commit() }
+                    .onExitCommand { editor = nil }
                     .onAppear { focus = .value }
+                    .accessibilityIdentifier("reviewValue-\(key)")
                 HStack {
-                    Button("确认", action: commit).buttonStyle(.borderedProminent)
-                    Button("取消") { editing = false }
+                    Button("保存") { commit() }.buttonStyle(.borderedProminent)
+                    if let onAdvance {
+                        Button("保存并下一条") { commit(then: onAdvance) }
+                            .accessibilityIdentifier("saveAndNextRecord")
+                    }
+                    Button("取消") { editor = nil }
                 }
                 .controlSize(.small)
             } else {
@@ -362,6 +386,7 @@ private struct FieldRow: View {
                         .lineLimit(2).textSelection(.enabled)
                 }
                 actions
+                    .disabled(editor != nil)
             }
             hint
         }
@@ -392,13 +417,14 @@ private struct FieldRow: View {
             }
             Button(field.confirmed == nil && field.suggested == nil ? "填写" : "修改") {
                 draft = field.confirmed ?? field.suggested ?? ""
-                editing = true
+                editor = .value(key)
             }
+            .accessibilityIdentifier("reviewEdit-\(key)")
             if field.suggested != nil, field.confirmed == nil {
                 Button(field.rejected == true ? "恢复建议" : "拒绝") { toggleRejected() }
             }
             if !field.hasHint && !editingHint {
-                Button("加提示") { hintDraft = ""; editingHint = true }
+                Button("加提示") { hintDraft = ""; editor = .hint(key) }
             }
         }
         .buttonStyle(.link)
@@ -412,14 +438,15 @@ private struct FieldRow: View {
                 TextField("给分析的提示", text: $hintDraft, axis: .vertical)
                     .lineLimit(1...4)
                     .focused($focus, equals: .hint)
-                    .onSubmit(saveHint)
-                    .onExitCommand { editingHint = false }
+                    .onSubmit { saveHint() }
+                    .onExitCommand { editor = nil }
                     .onAppear { focus = .hint }
             }
             .fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("保存提示", action: saveHint)
-                Button("取消") { editingHint = false }
+                Button("保存提示") { saveHint() }
+                if let onAdvance { Button("保存并下一条") { saveHint(then: onAdvance) } }
+                Button("取消") { editor = nil }
             }
             .controlSize(.small)
         } else if let text = field.hint, !text.isEmpty {
@@ -427,7 +454,8 @@ private struct FieldRow: View {
                 Rectangle().fill(Tone.human.color).frame(width: 2)
                 Text(text).font(.callout).textSelection(.enabled)
                 Spacer(minLength: 4)
-                Button("编辑") { hintDraft = text; editingHint = true }.buttonStyle(.link).font(.caption)
+                Button("编辑") { hintDraft = text; editor = .hint(key) }.buttonStyle(.link).font(.caption)
+                    .disabled(editor != nil)
             }
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityElement(children: .combine)
@@ -435,16 +463,17 @@ private struct FieldRow: View {
         }
     }
 
-    private func confirm(_ value: String) {
+    @discardableResult private func confirm(_ value: String) -> Bool {
         studio.edit { doc in
             guard let i = doc.marks.firstIndex(where: { $0.id == row.id }) else { return }
             doc.marks[i].fields[key, default: ReviewedText()].confirmed = value
             if row.kind == "lyric" && key == "label" { doc.invalidateWords(from: row.start, to: row.end) }
         }
     }
-    private func commit() {
-        confirm(draft)
-        editing = false
+    private func commit(then advance: (() -> Void)? = nil) {
+        guard confirm(draft) else { return }
+        editor = nil
+        advance?()
     }
     private func toggleRejected() {
         let rejected = field.rejected == true
@@ -454,14 +483,15 @@ private struct FieldRow: View {
             }
         }
     }
-    private func saveHint() {
+    private func saveHint(then advance: (() -> Void)? = nil) {
         let text = hintDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        studio.edit { doc in
+        guard studio.edit({ doc in
             if let i = doc.marks.firstIndex(where: { $0.id == row.id }) {
                 doc.marks[i].fields[key, default: ReviewedText()].hint = text.isEmpty ? nil : text
             }
-        }
-        editingHint = false
+        }) else { return }
+        editor = nil
+        advance?()
     }
 }
 

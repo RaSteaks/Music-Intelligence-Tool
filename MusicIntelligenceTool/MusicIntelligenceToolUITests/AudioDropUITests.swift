@@ -6,9 +6,7 @@ final class AudioDropUITests: XCTestCase {
         let directory = files.temporaryDirectory.appendingPathComponent("AudioDrop-" + UUID().uuidString)
         try files.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? files.removeItem(at: directory) }
-        let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let study = project.appendingPathComponent("MusicIntelligenceTool/MusicIntelligenceTool/Study.wav")
+        let study = try studyAudioFixture(in: Bundle(for: Self.self))
         for name in ["drop-first.wav", "drop-second.wav"] {
             try files.copyItem(at: study, to: directory.appendingPathComponent(name))
         }
@@ -63,4 +61,12 @@ final class AudioDropUITests: XCTestCase {
         screenshot.name = "从 Finder 拖入并切换音频"; screenshot.lifetime = .keepAlways
         add(screenshot)
     }
+}
+
+func studyAudioFixture(in testBundle: Bundle) throws -> URL {
+    // Read the same built-in sample from the build products, avoiding Desktop access from the runner.
+    let products = testBundle.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+    let app = Bundle(url: products.appendingPathComponent("MusicIntelligenceTool.app"))
+    return try XCTUnwrap(app?.url(forResource: "Study", withExtension: "wav"))
 }

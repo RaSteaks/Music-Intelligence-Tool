@@ -2,8 +2,8 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
-/// Playback, cue points, listening options and quick marking in one row below the canvas.
-/// It wraps onto two rows when the detail column is narrow.
+/// Playback, cue points, listening options and quick marking below the canvas.
+/// Keep action labels readable by wrapping controls before they truncate.
 struct TransportBar: View {
     @Bindable var studio: Studio
     let song: SongRecord
@@ -27,11 +27,21 @@ struct TransportBar: View {
                     Spacer(minLength: 8)
                     cuePoints
                 }
-                HStack(spacing: 10) {
-                    listening
-                    Spacer(minLength: 8)
-                    marking
-                    zoom
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        listening
+                        marking
+                        zoom
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 10) {
+                            listening
+                            Spacer(minLength: 8)
+                            zoom
+                        }
+                        marking
+                    }
                 }
             }
         }
@@ -45,7 +55,7 @@ struct TransportBar: View {
             }
             .keyboardShortcut(.space, modifiers: [])
             .accessibilityLabel("播放或暂停")
-            PlayheadClock(studio: studio)
+            PlayheadClock(studio: studio).help("播放头位置")
             Text("/ " + clockText(song.duration)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 .fixedSize()
         }
@@ -53,15 +63,15 @@ struct TransportBar: View {
 
     private var cuePoints: some View {
         Menu {
-            Button("标记入点（" + inShortcut.uppercased() + "）") { studio.markPoint(.entry) }
-            Button("标记出点（" + outShortcut.uppercased() + "）") { studio.markPoint(.exit) }
-            Button("清除出入点") { studio.selection = nil }
+            Button("设为选区起点（" + inShortcut.uppercased() + "）") { studio.markPoint(.entry) }
+            Button("设为选区终点（" + outShortcut.uppercased() + "）") { studio.markPoint(.exit) }
+            Button("清除选区") { studio.selection = nil }
                 .disabled(studio.inPoint == nil && studio.outPoint == nil)
         } label: {
             Text(pointReadout).font(.caption.monospacedDigit()).lineLimit(1)
         }
         .fixedSize()
-        .accessibilityLabel("出入点")
+        .accessibilityLabel("选区起止点")
         .accessibilityValue(pointReadout)
         .accessibilityIdentifier("cuePoints")
     }
@@ -77,6 +87,7 @@ struct TransportBar: View {
                 .accessibilityLabel("吸附拍点")
                 .help("拖动编辑时吸附到最近的拍点；按住 Option 临时关闭")
         }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var marking: some View {
@@ -88,7 +99,8 @@ struct TransportBar: View {
             Button("加歌词", systemImage: "text.quote") { onAdd("lyric") }
                 .help("在出入点处加一句歌词")
         }
-        .labelStyle(.iconOnly)
+        .labelStyle(.titleOnly)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var zoom: some View {
@@ -99,7 +111,7 @@ struct TransportBar: View {
     }
 
     private var pointReadout: String {
-        if studio.inPoint == nil && studio.outPoint == nil { return "出入点" }
+        if studio.inPoint == nil && studio.outPoint == nil { return "设置选区" }
         return "入 " + (studio.inPoint.map(clockText) ?? "—") + "   出 " + (studio.outPoint.map(clockText) ?? "—")
     }
 }

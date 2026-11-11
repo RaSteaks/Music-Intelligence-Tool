@@ -84,7 +84,7 @@ final class ModelEnvironment {
         restoreSnapshot()
     }
 
-    func checkIfNeeded(in directory: URL? = nil) {
+    func checkIfNeeded(in directory: URL? = nil, features: [ModelFeature] = ModelFeature.allCases) {
         guard !isBusy else { return }
         if let directory = directory?.standardizedFileURL, directory != self.directory {
             self.directory = directory
@@ -96,21 +96,25 @@ final class ModelEnvironment {
             cleanupStatus = nil
             restoreSnapshot()
         }
-        // A completed check has no expiry: page navigation must not launch model processes again.
-        if checkedAt == nil { refresh() }
-        else {
-            let missing = ModelFeature.allCases.filter { reports[$0] == nil }
-            if !missing.isEmpty { start(missing, download: false) }
-        }
+        // A task checks only its prerequisites. Settings fills in any features not checked yet.
+        let missing = checkedAt == nil ? features : features.filter { reports[$0] == nil }
+        if !missing.isEmpty || checkedAt == nil { refresh(missing) }
     }
 
-    func refresh() {
+    func refresh(_ features: [ModelFeature] = ModelFeature.allCases) {
         guard !isBusy else { return }
-        reports.removeAll()
-        errors.removeAll()
+        for feature in features {
+            reports[feature] = nil
+            errors[feature] = nil
+        }
         let paths = [directory.appendingPathComponent(".venv/bin").path] + Runtime.toolPath.components(separatedBy: ":")
         ffmpeg = paths.map { $0 + "/ffmpeg" }.first(where: FileManager.default.isExecutableFile(atPath:))
-        start(ModelFeature.allCases, download: false)
+        if features.isEmpty {
+            checkedAt = Date()
+            saveSnapshot()
+        } else {
+            start(features, download: false)
+        }
     }
 
     func download(_ feature: ModelFeature) {

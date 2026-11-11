@@ -32,9 +32,29 @@ struct Mark: Codable, Identifiable, Equatable {
         if kind == "insight" { return fields["label"]?.origin?.stale == true ? "待更新的解读" : "已拒绝的解读" }
         return kind
     }
+    /// Analysis merging protects any human input, including boundaries and hints.
     var reviewed: Bool {
         startConfirmed || endConfirmed || fields.values.contains { $0.confirmed != nil || $0.hint != nil || $0.rejected == true }
     }
+    var reviewStatus: ReviewStatus {
+        let content = fields["content"]
+        let field = kind == "insight" && (content?.confirmed != nil || content?.suggested != nil) ? content : fields["label"]
+        let hasText = field?.confirmed?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let noteHasContent = kind == "note" && fields["content"]?.confirmed?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let vocalState = fields["vocal_state"]?.confirmed
+        if hasText || noteHasContent || (kind == "lyric" && (vocalState == "纯器乐" || vocalState == "有演唱但听不清")) {
+            return .confirmed
+        }
+        if analysisStale == true || field?.origin?.stale == true { return .stale }
+        if field?.rejected == true { return .rejected }
+        if ["lyric", "note", "section"].contains(kind), field?.value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            return .unfilled
+        }
+        return reviewed ? .edited : .pending
+    }
+
+    var timeRange: ClosedRange<Double> { start...end }
+
     func overlaps(_ range: Range<Double>) -> Bool {
         start == end ? range.contains(start) : start < range.upperBound && end > range.lowerBound
     }
@@ -42,6 +62,23 @@ struct Mark: Codable, Identifiable, Equatable {
         // An empty label is an unfilled slot, not a confirmed clear.
         Mark(kind: kind, start: from, end: to, source: "user", startConfirmed: true, endConfirmed: true,
              fields: ["label": label.isEmpty ? ReviewedText() : ReviewedText(confirmed: label)])
+    }
+}
+
+enum ReviewStatus {
+    case unfilled, pending, edited, confirmed, rejected, stale
+
+    var needsReview: Bool { self != .confirmed && self != .rejected }
+
+    var title: String {
+        switch self {
+        case .unfilled: "待填写"
+        case .pending: "待核对"
+        case .edited: "已修改，待核对"
+        case .confirmed: "已确认"
+        case .rejected: "已拒绝"
+        case .stale: "待更新"
+        }
     }
 }
 

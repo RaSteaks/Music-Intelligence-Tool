@@ -5,12 +5,13 @@ final class WorkspaceUITests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let app = XCUIApplication()
+        app.launchArguments += ["-reviewAutoAudition", "NO"]
         app.launchEnvironment["MIT_LIBRARY"] = directory.path
         app.launchEnvironment["MIT_RUNTIME"] = directory.path
         app.launchEnvironment["MIT_MCP_PORT"] = "0"
         app.launch()
         defer { app.terminate() }
-        app.buttons["openStudy"].click()
+        openStudy(in: app)
         XCTAssertTrue(app.buttons["加歌词"].waitForExistence(timeout: 10))
         app.terminate()
 
@@ -39,11 +40,9 @@ final class WorkspaceUITests: XCTestCase {
             "audioSources": [], "maximumRequests": 2, "submittedRequests": 2, "runIDs": ["comparison"], "status": "完成", "mode": "models"]]
         try JSONSerialization.data(withJSONObject: record).write(to: file, options: .atomic)
         app.launch()
-        app.buttons["openStudy"].click()
+        openStudy(in: app)
         for (category, _, title) in cases {
-            let button = app.buttons["catalogCategory-" + category]
-            XCTAssertTrue(button.waitForExistence(timeout: 5))
-            button.click()
+            chooseCategory(category, in: app)
             let row = app.descendants(matching: .any).matching(identifier: "catalogItem-fixture-" + category).firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: 3))
             row.rightClick()
@@ -56,7 +55,8 @@ final class WorkspaceUITests: XCTestCase {
                 row.rightClick()
                 app.menuItems["循环试听"].click()
                 let points = app.descendants(matching: .any).matching(identifier: "cuePoints").firstMatch
-                XCTAssertEqual(points.value as? String, "入 00:02.00   出 00:04.00")
+                XCTAssertEqual(points.value as? String, "设置选区")
+                XCTAssertTrue(app.staticTexts["循环试听 · 00:02.00–00:04.00"].exists)
                 app.buttons["播放或暂停"].click()
                 row.rightClick()
             }
@@ -76,7 +76,7 @@ final class WorkspaceUITests: XCTestCase {
             }
             XCTAssertFalse(row.exists)
         }
-        app.buttons["catalogCategory-section"].click()
+        chooseCategory("section", in: app)
         for section in sections.dropLast() {
             let id = try XCTUnwrap(section["id"] as? String)
             app.descendants(matching: .any).matching(identifier: "catalogItem-" + id).firstMatch.rightClick()
@@ -95,12 +95,13 @@ final class WorkspaceUITests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let app = XCUIApplication()
+        app.launchArguments += ["-reviewAutoAudition", "NO"]
         app.launchEnvironment["MIT_LIBRARY"] = directory.path
         app.launchEnvironment["MIT_RUNTIME"] = directory.path
         app.launchEnvironment["MIT_MCP_PORT"] = "0"
         app.launch()
         defer { app.terminate() }
-        app.buttons["openStudy"].click()
+        openStudy(in: app)
         XCTAssertTrue(app.buttons["加歌词"].waitForExistence(timeout: 10))
         app.buttons["加歌词"].click()
         let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "catalogItem-"))
@@ -127,14 +128,14 @@ final class WorkspaceUITests: XCTestCase {
         first.rightClick()
         app.menuItems["删除歌词"].click()
         app.terminate(); app.launch()
-        app.buttons["openStudy"].click()
+        openStudy(in: app)
         XCTAssertTrue(app.buttons["catalogCategory-lyric"].waitForExistence(timeout: 10))
         app.buttons["catalogCategory-lyric"].click()
         XCTAssertFalse(first.exists)
         XCTAssertTrue(second.waitForExistence(timeout: 3))
         second.rightClick()
         app.menuItems["删除歌词"].click()
-        XCTAssertTrue(app.staticTexts["还没有记录。用走带条上的按钮添加。"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["逐句试听、填写与校对歌词"].waitForExistence(timeout: 3))
     }
 
     @MainActor func testScrubSelectEditAndReopen() throws {
@@ -142,12 +143,13 @@ final class WorkspaceUITests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let app = XCUIApplication()
         app.launchArguments = ["-cueInShortcut", "i", "-cueOutShortcut", "o"]
+        app.launchArguments += ["-reviewAutoAudition", "NO"]
         app.launchEnvironment["MIT_LIBRARY"] = directory.path
         app.launchEnvironment["MIT_RUNTIME"] = directory.path
         app.launchEnvironment["MIT_MCP_PORT"] = "0"
         app.launch()
         defer { app.terminate() }
-        app.buttons["openStudy"].click()
+        openStudy(in: app)
         let waveform = app.descendants(matching: .any).matching(identifier: "waveform").firstMatch
         XCTAssertTrue(waveform.waitForExistence(timeout: 10))
         let ruler = waveform.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0)).withOffset(CGVector(dx: 0, dy: 10))
@@ -173,11 +175,47 @@ final class WorkspaceUITests: XCTestCase {
         app.buttons["applyRange"].click()
         XCTAssertTrue(app.staticTexts["00:11.50"].firstMatch.waitForExistence(timeout: 5))
         app.terminate(); app.launch()
-        app.buttons["openStudy"].click()
+        openStudy(in: app)
         XCTAssertTrue(end.waitForExistence(timeout: 10))
         XCTAssertEqual(end.value as? String, "11.500")
         let screenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
         screenshot.name = "定位、分段校对与重新打开"; screenshot.lifetime = .keepAlways
         add(screenshot)
     }
+
+    @MainActor private func openStudy(in app: XCUIApplication) {
+        app.buttons["openStudy"].click()
+        let skip = app.buttons["跳过引导"]
+        XCTAssertTrue(skip.waitForExistence(timeout: 5))
+        skip.click()
+    }
+
+    @MainActor private func chooseCategory(_ category: String, in app: XCUIApplication) {
+        let list = app.scrollViews.containing(.outline, identifier: "catalogNavigation").firstMatch
+        let button = app.buttons["catalogCategory-" + category]
+        if !button.exists {
+            let group: String
+            switch category {
+            case "emotion", "event", "loudness": group = "sound"
+            case "chord", "rhythm", "repetition", "melody": group = "music"
+            case "insight", "models": group = "interpretation"
+            default: group = "structure"
+            }
+            let toggle = app.buttons["catalogGroup-" + group]
+            reveal(toggle, in: list)
+            toggle.click()
+        }
+        reveal(button, in: list)
+        button.click()
+    }
+
+    @MainActor private func reveal(_ element: XCUIElement, in scrollView: XCUIElement) {
+        for delta: CGFloat in [-280, 280] {
+            for _ in 0..<3 where !element.isHittable {
+                scrollView.scroll(byDeltaX: 0, deltaY: delta)
+            }
+        }
+        XCTAssertTrue(element.isHittable, element.debugDescription)
+    }
+
 }

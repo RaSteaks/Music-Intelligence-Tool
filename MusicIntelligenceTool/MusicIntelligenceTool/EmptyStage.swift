@@ -3,6 +3,7 @@ import SwiftUI
 /// The first screen: open a file, try the study piece, or pick up a recent record from the shelf.
 struct EmptyStage: View {
     let studio: Studio
+    let onStudy: () -> Void
     @State private var shelf: [ShelfEntry] = []
 
     struct ShelfEntry: Identifiable {
@@ -18,17 +19,20 @@ struct EmptyStage: View {
                     HStack(spacing: 40) {
                         VinylOutline().frame(width: 180, height: 180)
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("音乐分析工作台").font(.largeTitle.weight(.semibold))
-                            Text("将音频文件拖入工作区，或点击下方按钮打开。").foregroundStyle(.secondary)
-                            Text("支持 WAV、MP3、FLAC 和 M4A").font(.caption).foregroundStyle(.secondary)
+                            Text("看清一首歌的结构，逐段试听与校对").font(.largeTitle.weight(.semibold))
+                            Text("整理段落和歌词，给片段加注释，再导出记录或分享给 AI 助手。")
+                                .font(.body).foregroundStyle(.secondary)
                             HStack(spacing: 14) {
                                 Button("打开音频…", action: studio.chooseFile)
                                     .buttonStyle(.borderedProminent).controlSize(.large)
-                                Button("试听内置练习曲", action: studio.openStudy)
+                                Button("用示例体验", action: onStudy)
                                     .controlSize(.large)
                                     .accessibilityIdentifier("openStudy")
+                                    .help("用内置练习曲试听一个段落并添加注释")
                             }
                             .padding(.top, 4)
+                            Text("可拖入 WAV、MP3、FLAC 或 M4A。示例无需配置分析环境。")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     if !shelf.isEmpty {
@@ -76,8 +80,8 @@ struct EmptyStage: View {
 
     private func progress(_ record: SongRecord) -> String {
         let sections = record.sections
-        let confirmed = sections.filter { $0.provenance == .confirmed }.count
+        let confirmed = sections.filter { $0.reviewStatus == .confirmed }.count
         if record.status.isEmpty && confirmed == 0 && sections.count <= 1 { return "尚未分析" }
-        return "段落 \(confirmed)/\(sections.count) 已校"
+        return "段落 \(confirmed)/\(sections.count) 已确认"
     }
 }

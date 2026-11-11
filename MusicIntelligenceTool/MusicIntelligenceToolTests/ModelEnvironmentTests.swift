@@ -8,6 +8,9 @@ struct ModelEnvironmentTests {
         let first = try Fixture(), second = try Fixture()
         defer { try? FileManager.default.removeItem(at: first.root); try? FileManager.default.removeItem(at: second.root) }
         let models = first.makeEnvironment()
+        models.checkIfNeeded(features: [.lyrics]); try await finish(models)
+        #expect(try first.calls() == ["check:lyrics"])
+        #expect(models.reports[.base] == nil)
         models.checkIfNeeded(); try await finish(models)
         let checkedAt = try #require(models.checkedAt)
         #expect(try first.calls().count == ModelFeature.allCases.count)

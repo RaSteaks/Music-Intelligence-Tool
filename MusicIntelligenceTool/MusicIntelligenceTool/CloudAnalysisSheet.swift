@@ -21,9 +21,10 @@ struct CloudAnalysisSheet: View {
     @State private var force = false
     @State private var error: String?
 
-    init(studio: Studio) {
+    init(studio: Studio, compare: Bool = false) {
         self.studio = studio
-        let range = studio.selection ?? studio.row.map { $0.start...$0.end } ?? 0...(studio.song?.duration ?? 0)
+        let range = studio.analysisScope?.range ?? 0...0
+        _compare = State(initialValue: compare)
         _start = State(initialValue: range.lowerBound)
         _end = State(initialValue: range.upperBound)
     }
