@@ -54,7 +54,14 @@ struct AudioDropTests {
         #expect(reopened.row?.label == "手工段落")
         #expect(reopened.song?.revision == studio.song?.revision)
         let firstID = studio.song?.trackID
+        studio.seek(3)
         studio.seek(8)
+        studio.togglePlayback()
+        #expect(studio.playing)
+        #expect(abs(studio.position - 8) < 0.5)
+        studio.seek(14)
+        #expect(abs(studio.position - 14) < 0.5)
+        studio.togglePlayback()
         studio.selection = 2...5
         studio.zoom = 3
 

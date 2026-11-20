@@ -29,16 +29,18 @@ struct CanvasLayout {
 
     init(record: SongRecord, visible: Set<String>, hidden: Set<String> = [], selected: String?, height: CGFloat,
          scroll: Int = 0) {
-        let picked = record.marks.first { $0.id == selected }
+        let picked = visible.contains("event") ? selected.flatMap { id in record.marks.first { $0.id == id } } : nil
         // A selected semantic event borrows the insight lane so its range is visible.
         let semanticEvent = picked?.kind == "insight" && picked?.fields["category"]?.value == "event" && visible.contains("event")
         let ordinary = ["lyric", "word", "note", "chord", "emotion", "insight", "tempo", "repetition"].filter {
             visible.contains($0) || ($0 == "insight" && semanticEvent)
         }
-        let eventTypes = Set(record.marks.filter { $0.kind == "event" }.compactMap { $0.fields["event_type"]?.value })
-        let events = visible.contains("event")
-            ? ["silence", "vocals", "drums", "bass"].filter { eventTypes.contains($0) }.map { "event:" + $0 }
-                .filter { !hidden.contains($0) } : []
+        var events: [String] = []
+        if visible.contains("event") {
+            let eventTypes = Set(record.marks.lazy.filter { $0.kind == "event" }.compactMap { $0.fields["event_type"]?.value })
+            events = ["silence", "vocals", "drums", "bass"].filter { eventTypes.contains($0) }.map { "event:" + $0 }
+                .filter { !hidden.contains($0) }
+        }
         lanes = ordinary + events
         self.height = height
         let capacity = max(1, Int((height - 4 - Self.lanesFloor - 1) / Self.laneStep))
@@ -85,7 +87,7 @@ struct WaveformView: NSViewRepresentable {
     var hiddenLanes: Set<String> = []
     var laneScroll = 0
     var onLaneScroll: (Int) -> Void = { _ in }
-    /// Receives the new scroll position (0...1, same scale as the navigator) after a horizontal swipe.
+    /// Relative swipe distance on the navigator’s 0...1 scale. Events can arrive between SwiftUI updates.
     var onPan: (Double) -> Void = { _ in }
     var palette = WavePalette.teal
 
@@ -117,13 +119,40 @@ private final class PlayheadView: NSView {
     }
 }
 
+/// Pointer feedback is composited above the expensive waveform and below the playhead.
+private final class WaveOverlay: NSView {
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func draw(_ dirtyRect: NSRect) { (superview as? WaveCanvas)?.drawOverlay() }
+}
+
 final class WaveCanvas: NSView {
     var input: WaveformView? {
         didSet {
-            if needsRedraw(from: oldValue) { needsDisplay = true }
+            let recordChanged = oldValue?.record.trackID != input?.record.trackID
+                || oldValue?.record.revision != input?.record.revision || oldValue?.record.marks.count != input?.record.marks.count
+            if let input {
+                if recordChanged { refreshCaches(input) }
+                if recordChanged || oldValue?.visible != input.visible || oldValue?.selected != input.selected {
+                    // Keep hidden analysis tracks out of the per-frame viewport scan during a swipe.
+                    drawableMarks = input.record.marks.filter { row in
+                        guard row.analysisStale != true || row.reviewed else { return false }
+                        if row.kind == "insight" {
+                            return row.id == input.selected && (input.visible.contains("insight")
+                                || (input.visible.contains("event") && row.fields["category"]?.value == "event"))
+                        }
+                        return input.visible.contains(row.kind) || (row.kind == "rhythm_beat" && input.visible.contains("beat"))
+                    }
+                }
+            }
+            if recordChanged || needsRedraw(from: oldValue) {
+                needsDisplay = true
+                overlay.needsDisplay = true
+            }
             noteDevelopment(from: oldValue)
             updatePlayhead()
             if oldValue?.inPoint != input?.inPoint || oldValue?.outPoint != input?.outPoint || oldValue?.window != input?.window {
+                overlay.needsDisplay = true
                 window?.invalidateCursorRects(for: self)
             }
         }
@@ -138,8 +167,11 @@ final class WaveCanvas: NSView {
     private var hits: [(rect: NSRect, row: Mark)] = []
     private var hoverX: CGFloat?
     private var tracking: NSTrackingArea?
+    private let overlay = WaveOverlay()
     private let playhead = PlayheadView()
-    private var cacheKey: (track: String, revision: Int)?
+    private var drawableMarks: [Mark] = []
+    private var sections: [Mark] = []
+    private var chords: [Mark] = []
     private var sectionSummaries: [String: String] = [:]
     private var formLetters: [String: String] = [:]
     private var downbeats: [Double] = []
@@ -153,12 +185,19 @@ final class WaveCanvas: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        addSubview(playhead)
+        configureLayers()
     }
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+        configureLayers()
+    }
+    private func configureLayers() {
         wantsLayer = true
+        overlay.wantsLayer = true
+        overlay.frame = bounds
+        overlay.autoresizingMask = [.width, .height]
+        addSubview(overlay)
+        playhead.wantsLayer = true
         addSubview(playhead)
     }
 
@@ -188,6 +227,7 @@ final class WaveCanvas: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
+        overlay.needsDisplay = true
     }
     override func layout() {
         super.layout()
@@ -204,18 +244,17 @@ final class WaveCanvas: NSView {
 
     private func needsRedraw(from old: WaveformView?) -> Bool {
         guard let old, let new = input else { return true }
-        return old.record.trackID != new.record.trackID || old.record.revision != new.record.revision
-            || old.record.marks.count != new.record.marks.count || old.record.duration != new.record.duration
+        return old.record.duration != new.record.duration
             || old.peaks.count != new.peaks.count || old.visible != new.visible || old.selected != new.selected
-            || old.inPoint != new.inPoint || old.outPoint != new.outPoint || old.window != new.window
-            || old.bars != new.bars || old.snap != new.snap
+            || old.window != new.window
+            || old.bars != new.bars
             || old.hiddenLanes != new.hiddenLanes || old.laneScroll != new.laneScroll || old.palette != new.palette
     }
 
     /// A module that just finished fades its lanes in. This is the only motion not caused by the user.
     private func noteDevelopment(from old: WaveformView?) {
         guard let old, let new = input, old.record.trackID == new.record.trackID,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+              old.record.status != new.record.status, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
         let now = Date()
         for job in AnalysisJob.allCases where new.record.status[job.rawValue] == "完成" && old.record.status[job.rawValue] != "完成" {
             for kind in job.kinds { developing[kind] = now }
@@ -237,7 +276,7 @@ final class WaveCanvas: NSView {
 
     private func updatePlayhead() {
         guard let i = input, bounds.width > 0 else { playhead.isHidden = true; return }
-        let head = resizing == nil ? i.cursor : (dragTime ?? i.cursor)
+        let head = seeking || resizing != nil ? (dragTime ?? i.cursor) : i.cursor
         let xx = x(head)
         playhead.isHidden = xx < -5 || xx > bounds.width + 5
         let frame = NSRect(x: xx - 5, y: 0, width: 10, height: bounds.height)
@@ -245,8 +284,8 @@ final class WaveCanvas: NSView {
     }
 
     private func refreshCaches(_ i: WaveformView) {
-        guard cacheKey?.track != i.record.trackID || cacheKey?.revision != i.record.revision else { return }
-        let sections = i.record.sections
+        sections = i.record.sections
+        chords = i.record.marks.filter { $0.kind == "chord" && $0.analysisStale != true }
         sectionSummaries = Dictionary(uniqueKeysWithValues: sections.map { ($0.id, i.record.summary(for: $0)) })
         // Sections that share a name share a form letter, so repeats read as A B A B C.
         var letters: [String: String] = [:]
@@ -264,7 +303,6 @@ final class WaveCanvas: NSView {
         downbeats = i.record.marks.filter { $0.kind == "downbeat" && $0.analysisStale != true }.map(\.start).sorted()
         let beatKind = i.record.marks.contains { $0.kind == "beat" && $0.analysisStale != true } ? "beat" : "rhythm_beat"
         beats = i.record.marks.filter { $0.kind == beatKind && $0.analysisStale != true }.map(\.start).sorted()
-        cacheKey = (i.record.trackID, i.record.revision)
     }
 
     private func x(_ time: Double) -> CGFloat {
@@ -275,10 +313,12 @@ final class WaveCanvas: NSView {
         guard let i = input else { return 0 }
         let span = i.window.upperBound-i.window.lowerBound
         let t = i.window.lowerBound + min(1, max(0, x/max(1, bounds.width))) * span
-        let kind = i.record.marks.contains { $0.kind == "beat" && $0.analysisStale != true } ? "beat" : "rhythm_beat"
-        if snap && i.snap, let beat = i.record.marks.filter({ $0.kind == kind && $0.analysisStale != true && abs($0.start-t) < 7*span/bounds.width })
-            .min(by: { abs($0.start-t) < abs($1.start-t) }) { return beat.start }
-        return t
+        guard snap, i.snap, !beats.isEmpty else { return t }
+        let right = beats.partitionIndex { $0 >= t }
+        let leftBeat = beats[max(0, right - 1)]
+        let rightBeat = beats[min(right, beats.count - 1)]
+        let nearest = abs(leftBeat - t) <= abs(rightBeat - t) ? leftBeat : rightBeat
+        return abs(nearest - t) < 7 * span / bounds.width ? nearest : t
     }
     private func line(_ a: NSPoint, _ b: NSPoint, _ color: NSColor, width: CGFloat = 1, dash: [CGFloat] = []) {
         color.setStroke()
@@ -378,12 +418,10 @@ final class WaveCanvas: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let i = input, bounds.width > 0 else { return }
-        refreshCaches(i)
         let layout = laneLayout(i)
         Tone.paper.ns.setFill()
         bounds.fill()
         hits = []
-        let sections = i.record.sections
         let showSections = i.visible.contains("section")
         // Alternate sections are tinted behind the waveform so structure reads without colour coding.
         if showSections {
@@ -405,17 +443,22 @@ final class WaveCanvas: NSView {
         if showSections { drawSections(i, sections) }
         drawWave(i, layout)
         drawMarks(i, layout)
+    }
 
+    fileprivate func drawOverlay() {
+        guard let i = input else { return }
         var entry = i.inPoint
         var exit = i.outPoint
-        if movingPoint == nil, resizing == nil, let a = anchor, let b = dragTime {
+        if let movingPoint, let dragTime {
+            if movingPoint == .entry { entry = dragTime } else { exit = dragTime }
+        } else if !seeking, resizing == nil, let a = anchor, let b = dragTime {
             entry = min(a, b); exit = max(a, b)
         }
         if let entry, let exit {
             Tone.sound.ns.withAlphaComponent(0.12).setFill()
             NSRect(x: x(entry), y: CanvasLayout.bandTop, width: x(exit)-x(entry), height: bounds.height - CanvasLayout.bandTop).fill()
         }
-        drawHover(i)
+        drawHover()
         if let entry { drawPoint(.entry, at: entry) }
         if let exit { drawPoint(.exit, at: exit) }
     }
@@ -523,10 +566,7 @@ final class WaveCanvas: NSView {
     private func drawMarks(_ i: WaveformView, _ layout: CanvasLayout) {
         let mid = layout.waveMid
         let half = layout.waveHalf
-        let rows = i.record.marks.filter { row in
-            let semanticEvent = row.kind == "insight" && row.fields["category"]?.value == "event" && row.id == i.selected
-            return (row.analysisStale != true || row.reviewed) && (i.visible.contains(row.kind) || (i.visible.contains("event") && semanticEvent) || (row.kind == "rhythm_beat" && i.visible.contains("beat"))) && x(row.end) >= 0 && x(row.start) <= bounds.width
-        }
+        let rows = drawableMarks.filter { $0.end >= i.window.lowerBound && $0.start <= i.window.upperBound }
         let pitches = rows.filter { $0.kind == "pitch" && $0.analysisStale != true }.compactMap { $0.metrics["midi_pitch"] }
         let pitchLow = floor(pitches.min() ?? 48)
         let pitchHigh = max(pitchLow + 12, ceil(pitches.max() ?? 84))
@@ -536,9 +576,6 @@ final class WaveCanvas: NSView {
                  font: .systemFont(ofSize: 10), color: Tone.machine.ns, align: .right)
         }
         for row in rows {
-            // Semantic findings often share an interval. Show the selected
-            // finding's range; the list exposes every candidate without overlap.
-            if row.kind == "insight" && row.id != i.selected { continue }
             let xx = x(row.start)
             let alpha = developAlpha(row.kind)
             if ["beat", "downbeat", "onset", "rhythm_beat"].contains(row.kind) {
@@ -685,15 +722,14 @@ final class WaveCanvas: NSView {
         let span = i.window.upperBound - i.window.lowerBound
         let travel = i.record.duration - span
         guard travel > 0.001, bounds.width > 0, points != 0 else { return }
-        let start = min(travel, max(0, i.window.lowerBound - Double(points) * span / Double(bounds.width)))
-        if start != i.window.lowerBound { i.onPan(start / travel) }
+        i.onPan(-Double(points) * span / (Double(bounds.width) * travel))
     }
 
-    private func drawHover(_ i: WaveformView) {
+    private func drawHover() {
         guard let hx = hoverX, anchor == nil, hx >= 0, hx <= bounds.width else { return }
         line(.init(x: hx, y: CanvasLayout.rulerHeight), .init(x: hx, y: bounds.height), Tone.pencil.ns.withAlphaComponent(0.5),
              dash: [2, 2])
-        let readout = hoverText(time(hx, snap: false), in: i)
+        let readout = hoverText(time(hx, snap: false))
         let font = Typeface.digits(10, weight: .medium)
         let width = (readout as NSString).size(withAttributes: [.font: font]).width + 12
         let left = hx + 6 + width > bounds.width ? hx - 6 - width : hx + 6
@@ -704,14 +740,15 @@ final class WaveCanvas: NSView {
         text(readout, pill.insetBy(dx: 6, dy: 2), font: font, color: Tone.ink.ns)
     }
 
-    private func hoverText(_ t: Double, in i: WaveformView) -> String {
+    private func hoverText(_ t: Double) -> String {
         var parts = [clockText(t)]
-        if let bar = downbeats.lastIndex(where: { $0 <= t }) {
-            let beat = beats.filter { $0 >= downbeats[bar] - 0.01 && $0 <= t }.count
+        let bar = downbeats.partitionIndex { $0 > t } - 1
+        if bar >= 0 {
+            let beat = beats.partitionIndex { $0 > t } - beats.partitionIndex { $0 >= downbeats[bar] - 0.01 }
             parts.append("第 \(bar + 1) 小节" + (beat > 0 ? "第 \(beat) 拍" : ""))
         }
-        if let section = i.record.sections.first(where: { $0.start <= t && t < $0.end }) { parts.append(section.label) }
-        if let chord = i.record.marks.first(where: { $0.kind == "chord" && $0.analysisStale != true && $0.start <= t && t < $0.end }) {
+        if let section = sections.first(where: { $0.start <= t && t < $0.end }) { parts.append(section.label) }
+        if let chord = chords.first(where: { $0.start <= t && t < $0.end }) {
             parts.append(chord.label)
         }
         return parts.joined(separator: "  ")
@@ -719,11 +756,11 @@ final class WaveCanvas: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         hoverX = convert(event.locationInWindow, from: nil).x
-        needsDisplay = true
+        overlay.needsDisplay = true
     }
     override func mouseExited(with event: NSEvent) {
         hoverX = nil
-        needsDisplay = true
+        overlay.needsDisplay = true
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -733,8 +770,12 @@ final class WaveCanvas: NSView {
         movingPoint = nil; picked = nil
         // Fix the gesture at mouse-down so crossing into the waveform cannot turn a seek into a selection.
         seeking = rulerRect.contains(p)
+        overlay.needsDisplay = true
         if let i = input {
-            if seeking { i.onSeek(time(p.x, snap: false)); return }
+            if seeking, let anchor {
+                scrub(to: anchor)
+                return
+            }
             movingPoint = hitPoint(p, in: i)
             if movingPoint != nil { return }
         }
@@ -749,29 +790,38 @@ final class WaveCanvas: NSView {
             }
         }
     }
+    private func scrub(to t: Double) {
+        dragTime = t
+        updatePlayhead()
+        input?.onSeek(t)
+    }
+
     override func mouseDragged(with event: NSEvent) {
         if seeking {
             // Navigation stays continuous; beat snapping belongs to edits, as with a waveform click.
-            input?.onSeek(time(convert(event.locationInWindow, from: nil).x, snap: false))
+            scrub(to: time(convert(event.locationInWindow, from: nil).x, snap: false))
             return
         }
         let t = time(convert(event.locationInWindow, from: nil).x,snap: !event.modifierFlags.contains(.option))
         if let edge = movingPoint, let i = input {
             let limit = edge == .entry ? min(t, i.outPoint ?? t) : max(t, i.inPoint ?? t)
+            dragTime = limit
             i.onMovePoint(edge, limit)
         } else {
             dragTime = t
         }
-        needsDisplay = true
+        overlay.needsDisplay = true
         updatePlayhead()
     }
     override func mouseUp(with event: NSEvent) {
         defer {
-            anchor=nil; dragTime=nil; resizing=nil; movingPoint=nil; picked=nil; seeking=false; needsDisplay=true
-            updatePlayhead()
+            let wasResizing = resizing != nil
+            anchor = nil; dragTime = nil; resizing = nil; movingPoint = nil; picked = nil; seeking = false
+            overlay.needsDisplay = true
+            if wasResizing { updatePlayhead() }
         }
         if seeking {
-            input?.onSeek(time(convert(event.locationInWindow, from: nil).x, snap: false))
+            scrub(to: time(convert(event.locationInWindow, from: nil).x, snap: false))
             return
         }
         if movingPoint != nil { return }
@@ -780,6 +830,19 @@ final class WaveCanvas: NSView {
         else if let b = dragTime, abs(x(a)-x(b)) > 3 { i.onRange(min(a,b)...max(a,b)) }
         else if let row = picked { i.onPick(row) }
         else { i.onSeek(a) }
+    }
+}
+
+private extension Array where Element == Double {
+    /// First matching index in sorted times, or endIndex if all times precede the boundary.
+    func partitionIndex(where matches: (Double) -> Bool) -> Int {
+        var low = startIndex
+        var high = endIndex
+        while low < high {
+            let mid = low + (high - low) / 2
+            if matches(self[mid]) { high = mid } else { low = mid + 1 }
+        }
+        return low
     }
 }
 

@@ -96,10 +96,7 @@ struct ContentView: View {
     // MARK: Workspace
 
     private func workspace(_ song: SongRecord) -> some View {
-        let span = song.duration / studio.zoom
-        let offset = pan * (song.duration - span)
-        let window = offset...(offset + span)
-        return NavigationSplitView {
+        NavigationSplitView {
             CatalogSidebar(studio: studio, song: song, tab: $tab, filter: $catalogFilter, onCategory: openCategory,
                            onSelect: selectForReview, onAnalyze: { prepareAnalysis([$0], title: $0.title, wholeTrack: $0 == .lyrics) },
                            onCloud: openCloud, onAdd: add)
@@ -109,20 +106,9 @@ struct ContentView: View {
                 workspaceGuidance(song)
                 WorkspaceScopeBar(studio: studio)
                 VStack(spacing: 8) {
-                    HStack(spacing: 0) {
-                        TrackGutter(studio: studio, record: song, bars: $rulerBars)
-                        TimelineCanvas(studio: studio, song: song, window: window, bars: rulerBars,
-                                       inShortcut: inShortcut, outShortcut: outShortcut, onSelect: selectForReview, onResize: resize,
-                                       onPan: { pan = $0 })
-                    }
-                    .frame(minHeight: 210, maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(Tone.rule.color) }
-                    if studio.zoom > 1 {
-                        TimelineNavigator(pan: $pan, height: $navigatorHeight, window: window, duration: song.duration,
-                                          peaks: studio.peaks, studio: studio)
-                            .padding(.leading, CanvasLayout.gutterWidth)
-                    }
+                    WorkspaceTimeline(studio: studio, song: song, pan: $pan, bars: $rulerBars,
+                                      navigatorHeight: $navigatorHeight, inShortcut: inShortcut, outShortcut: outShortcut,
+                                      onSelect: selectForReview, onResize: resize)
                     TransportBar(studio: studio, song: song, inShortcut: inShortcut, outShortcut: outShortcut, onAdd: add)
                 }
                 .padding(12)
@@ -549,6 +535,41 @@ private enum WorkspaceSheet: Identifiable {
         case .analysis(let request): request.id.uuidString
         case .cloud(let compare): compare ? "comparison" : "cloud"
         case .delivery(let song): "delivery-\(song.trackID)-\(song.revision)"
+        }
+    }
+}
+
+/// Keep viewport changes local so a trackpad swipe does not rebuild the catalog and inspector.
+private struct WorkspaceTimeline: View {
+    let studio: Studio
+    let song: SongRecord
+    @Binding var pan: Double
+    @Binding var bars: Bool
+    @Binding var navigatorHeight: Double
+    let inShortcut: String
+    let outShortcut: String
+    let onSelect: (Mark) -> Void
+    let onResize: (String, Bool, Double) -> Void
+
+    var body: some View {
+        let span = song.duration / studio.zoom
+        let offset = pan * (song.duration - span)
+        let window = offset...(offset + span)
+        Group {
+            HStack(spacing: 0) {
+                TrackGutter(studio: studio, record: song, bars: $bars)
+                TimelineCanvas(studio: studio, song: song, window: window, bars: bars,
+                               inShortcut: inShortcut, outShortcut: outShortcut, onSelect: onSelect, onResize: onResize,
+                               onPan: { pan = min(1, max(0, pan + $0)) })
+            }
+            .frame(minHeight: 210, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(Tone.rule.color) }
+            if studio.zoom > 1 {
+                TimelineNavigator(pan: $pan, height: $navigatorHeight, window: window, duration: song.duration,
+                                  peaks: studio.peaks, studio: studio)
+                    .padding(.leading, CanvasLayout.gutterWidth)
+            }
         }
     }
 }

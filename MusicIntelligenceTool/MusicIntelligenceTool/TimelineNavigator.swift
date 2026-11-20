@@ -24,32 +24,23 @@ struct TimelineNavigator: View {
         GeometryReader { geometry in
             let width = geometry.size.width
             let viewport = viewportRect(width: width, height: geometry.size.height)
-            Canvas { context, size in
-                let columns = max(1, Int(size.width))
-                var wave = Path()
-                let scale = (size.height / 2 - 2) / CGFloat(max(peaks.max() ?? 0, 0.01))
-                for column in 0..<columns where !peaks.isEmpty {
-                    let start = column * peaks.count / columns
-                    let end = max(start + 1, (column + 1) * peaks.count / columns)
-                    let h = max(0.5, CGFloat(peaks[start..<end].max() ?? 0) * scale)
-                    let x = CGFloat(column) + 0.5
-                    wave.move(to: CGPoint(x: x, y: size.height / 2 - h))
-                    wave.addLine(to: CGPoint(x: x, y: size.height / 2 + h))
+            NavigatorWaveform(peaks: peaks, palette: palette)
+                .overlay(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Tone.sound.color.opacity(0.12))
+                        .overlay { RoundedRectangle(cornerRadius: 3).strokeBorder(Tone.ink.color.opacity(0.75), lineWidth: 1) }
+                        .frame(width: viewport.width, height: viewport.height)
+                        .offset(x: viewport.minX)
                 }
-                context.stroke(wave, with: .color(Color(nsColor: palette.edge).opacity(0.55)), lineWidth: 1)
-                let shape = Path(roundedRect: viewport.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 3)
-                context.fill(shape, with: .color(Tone.sound.color.opacity(0.12)))
-                context.stroke(shape, with: .color(Tone.ink.color.opacity(0.75)), lineWidth: 1)
-            }
-            .overlay(alignment: .topLeading) { NavigatorPlayhead(studio: studio, duration: duration, width: width) }
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                if grab == nil {
-                    grab = viewport.contains(value.startLocation) ? value.startLocation.x - viewport.minX : viewport.width / 2
-                }
-                let travel = max(1, width - viewport.width)
-                pan = min(1, max(0, (value.location.x - (grab ?? 0)) / travel))
-            }.onEnded { _ in grab = nil })
+                .overlay(alignment: .topLeading) { NavigatorPlayhead(studio: studio, duration: duration, width: width) }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                    if grab == nil {
+                        grab = viewport.contains(value.startLocation) ? value.startLocation.x - viewport.minX : viewport.width / 2
+                    }
+                    let travel = max(1, width - viewport.width)
+                    pan = min(1, max(0, (value.location.x - (grab ?? 0)) / travel))
+                }.onEnded { _ in grab = nil })
         }
         // A short window may squeeze the strip back toward its minimum; the timeline keeps its own minimum height.
         .frame(minHeight: Self.heightRange.lowerBound, maxHeight: height)
@@ -97,6 +88,29 @@ struct TimelineNavigator: View {
         let left = width * window.lowerBound / duration
         let span = max(6, width * (window.upperBound - window.lowerBound) / duration)
         return CGRect(x: left, y: 0, width: span, height: height)
+    }
+}
+
+/// The whole-song envelope stays fixed while its viewport moves.
+private struct NavigatorWaveform: View {
+    let peaks: [Float]
+    let palette: WavePalette
+
+    var body: some View {
+        Canvas { context, size in
+            let columns = max(1, Int(size.width))
+            var wave = Path()
+            let scale = (size.height / 2 - 2) / CGFloat(max(peaks.max() ?? 0, 0.01))
+            for column in 0..<columns where !peaks.isEmpty {
+                let start = column * peaks.count / columns
+                let end = max(start + 1, (column + 1) * peaks.count / columns)
+                let h = max(0.5, CGFloat(peaks[start..<end].max() ?? 0) * scale)
+                let x = CGFloat(column) + 0.5
+                wave.move(to: CGPoint(x: x, y: size.height / 2 - h))
+                wave.addLine(to: CGPoint(x: x, y: size.height / 2 + h))
+            }
+            context.stroke(wave, with: .color(Color(nsColor: palette.edge).opacity(0.55)), lineWidth: 1)
+        }
     }
 }
 

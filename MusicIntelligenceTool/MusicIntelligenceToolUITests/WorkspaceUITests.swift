@@ -165,8 +165,7 @@ final class WorkspaceUITests: XCTestCase {
         first.press(forDuration: 0.1, thenDragTo: second)
         XCTAssertEqual(points.value as? String, firstReadout)
         let secondTime = try XCTUnwrap(app.staticTexts["playheadTime"].value as? String)
-        let seconds = try XCTUnwrap(Double(secondTime.components(separatedBy: ":").last ?? ""))
-        XCTAssertEqual(seconds, 24, accuracy: 0.1)
+        XCTAssertEqual(try seconds(from: secondTime), 24, accuracy: 0.1)
         app.typeKey("o", modifierFlags: [])
         XCTAssertEqual(points.value as? String, "入 \(firstExit)   出 \(secondTime)")
         let end = app.textFields["rangeEnd"]
@@ -178,9 +177,34 @@ final class WorkspaceUITests: XCTestCase {
         openStudy(in: app)
         XCTAssertTrue(end.waitForExistence(timeout: 10))
         XCTAssertEqual(end.value as? String, "11.500")
+        // Panning the zoomed waveform and dragging its overview both move the same viewport.
+        app.sliders["时间轴缩放"].coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.5)).click()
+        let navigator = app.sliders["滚动时间轴"]
+        XCTAssertTrue(navigator.waitForExistence(timeout: 5))
+        // Read the ruler at the same screen position to verify the detail canvas follows the viewport.
+        let clock = app.staticTexts["playheadTime"]
+        first.click()
+        let initialTime = try seconds(from: XCTUnwrap(clock.value as? String))
+        waveform.scroll(byDeltaX: -100, deltaY: 0)
+        first.click()
+        let scrolledTime = try seconds(from: XCTUnwrap(clock.value as? String))
+        XCTAssertGreaterThan(scrolledTime, initialTime)
+        let left = navigator.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5))
+        let right = navigator.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5))
+        left.press(forDuration: 0.1, thenDragTo: right)
+        first.click()
+        let draggedTime = try seconds(from: XCTUnwrap(clock.value as? String))
+        XCTAssertGreaterThan(draggedTime, scrolledTime)
         let screenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
         screenshot.name = "定位、分段校对与重新打开"; screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    private func seconds(from clock: String) throws -> Double {
+        let colon = try XCTUnwrap(clock.firstIndex(of: ":"))
+        let minutes = try XCTUnwrap(Int(clock[..<colon]))
+        let seconds = try XCTUnwrap(Double(clock[clock.index(after: colon)...]))
+        return Double(minutes * 60) + seconds
     }
 
     @MainActor private func openStudy(in app: XCUIApplication) {

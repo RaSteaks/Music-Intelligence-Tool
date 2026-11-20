@@ -131,6 +131,44 @@ struct TimelineInteractionTests {
         #expect(studio.selection == 5...19 && studio.cursor == 20)
     }
 
+    @Test func draggingOnAnalyzedWaveformKeepsBackgroundClean() throws {
+        let studio = makeStudio()
+        studio.peaks = Array(repeating: 0.75, count: 24_000)
+        studio.song?.marks += (0..<6000).map { index in
+            let t = Double(index) / 100
+            return Mark(kind: index.isMultiple(of: 50) ? "rhythm_beat" : "pitch", start: t, end: t, source: "fixture")
+        }
+        let canvas = try makeCanvas(studio)
+        let host = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        host.contentView = canvas
+        host.orderBack(nil)
+        defer { host.orderOut(nil) }
+        host.display()
+        let background = try #require(canvas.layer)
+        var backgroundInvalidations = 0
+        for column in 100..<160 {
+            background.displayIfNeeded()
+            canvas.mouseMoved(with: try event(.mouseMoved, at: NSPoint(x: column, y: 140), in: canvas))
+            if background.needsDisplay() { backgroundInvalidations += 1 }
+        }
+        canvas.mouseDown(with: try event(.leftMouseDown, at: NSPoint(x: 100, y: 140), in: canvas))
+        for column in 240..<300 {
+            background.displayIfNeeded()
+            canvas.mouseDragged(with: try event(.leftMouseDragged, at: NSPoint(x: column, y: 140), in: canvas))
+            if background.needsDisplay() { backgroundInvalidations += 1 }
+        }
+        canvas.mouseUp(with: try event(.leftMouseUp, at: NSPoint(x: 299, y: 140), in: canvas))
+        #expect(studio.selection == 10...30)
+        #expect(backgroundInvalidations == 0)
+        // SwiftUI sends the committed cue points and cursor back to the canvas after the drag.
+        background.displayIfNeeded()
+        canvas.input = try makeCanvas(studio).input
+        #expect(!background.needsDisplay())
+        // Only the visible time range changes in this update.
+        canvas.input = try makeCanvas(studio, window: 10...30).input
+        #expect(background.needsDisplay())
+    }
+
     private func makeStudio() -> Studio {
         let studio = Studio(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         studio.song = SongRecord(url: URL(fileURLWithPath: "/study.wav"), duration: 60)
@@ -140,7 +178,7 @@ struct TimelineInteractionTests {
 
     private func makeCanvas(_ studio: Studio, window: ClosedRange<Double> = 0...60) throws -> WaveCanvas {
         let canvas = WaveCanvas(frame: NSRect(x: 0, y: 0, width: 600, height: 240))
-        canvas.input = WaveformView(record: try #require(studio.song), peaks: [], visible: ["section"], selected: studio.selected,
+        canvas.input = WaveformView(record: try #require(studio.song), peaks: studio.peaks, visible: ["section"], selected: studio.selected,
                                     inPoint: studio.inPoint, outPoint: studio.outPoint, cursor: studio.cursor,
                                     window: window, snap: studio.snap, inShortcut: "i", outShortcut: "o",
                                     onShortcut: studio.markPoint, onMovePoint: studio.setPoint,

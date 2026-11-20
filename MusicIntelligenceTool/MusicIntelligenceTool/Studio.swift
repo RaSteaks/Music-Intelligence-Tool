@@ -294,7 +294,8 @@ final class Studio {
 
     func seek(_ t: Double) {
         cursor = max(0, min(song?.duration ?? 0, t))
-        player?.currentTime = cursor
+        // A paused scrub only moves the editor cursor. Position the decoder once when playback starts.
+        if playing { player?.currentTime = cursor }
     }
     func markPoint(_ edge: CueEdge) {
         guard song != nil else { return }
@@ -330,6 +331,7 @@ final class Studio {
         else {
             if loop, let range = loopRange, !range.contains(cursor) { seek(range.lowerBound) }
             if cursor >= player.duration { seek(0) }
+            player.currentTime = cursor
             playing = player.play()
         }
     }
