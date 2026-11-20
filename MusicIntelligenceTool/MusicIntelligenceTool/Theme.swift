@@ -11,6 +11,41 @@ enum Tone: String {
     var ns: NSColor { NSColor(named: rawValue) ?? .labelColor }
 }
 
+/// Waveform colours chosen in Settings. Each palette is one hue at two lightnesses with low saturation,
+/// so the waveform stays background context and amber overlays remain the brightest marks on the canvas.
+enum WavePalette: String, CaseIterable, Identifiable {
+    case teal, ink
+    static let preference = "wavePalette"
+    var id: Self { self }
+
+    var title: String { self == .teal ? "深青" : "墨蓝" }
+    var detail: String { self == .teal ? "延续声音的青色，明暗区分主体与峰值" : "冷静的蓝色，与琥珀叠加线对比更强" }
+
+    /// Mean-loudness body of the waveform.
+    var body: NSColor {
+        switch self {
+        case .teal: Self.dynamic(light: 0xA9CFCB, dark: 0x2A5F5B)
+        case .ink: Self.dynamic(light: 0xAFC0DA, dark: 0x2E4A72)
+        }
+    }
+    /// Peak envelope, drawn at `edgeAlpha` behind the body.
+    var edge: NSColor {
+        switch self {
+        case .teal: Self.dynamic(light: 0x1A7A72, dark: 0x5CC8BE)
+        case .ink: Self.dynamic(light: 0x2E4A72, dark: 0x7FA3D6)
+        }
+    }
+    static let edgeAlpha: CGFloat = 0.45
+
+    private static func dynamic(light: Int, dark: Int) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let hex = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255,
+                           blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+        }
+    }
+}
+
 enum Typeface {
     /// Songti is reserved for the work itself: titles, section names and lyrics.
     static func songti(_ size: CGFloat, bold: Bool = false) -> Font {

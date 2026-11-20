@@ -6,13 +6,14 @@ enum AppPage: String {
 }
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case environment, externalModels, service, shortcuts
+    case environment, externalModels, service, appearance, shortcuts
     var id: Self { self }
     var title: String {
         switch self {
         case .environment: "分析环境"
         case .externalModels: "外部模型"
         case .service: "MCP 服务"
+        case .appearance: "外观"
         case .shortcuts: "快捷键"
         }
     }
@@ -21,6 +22,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .environment: "externaldrive"
         case .externalModels: "sparkles"
         case .service: "network"
+        case .appearance: "paintpalette"
         case .shortcuts: "keyboard"
         }
     }
@@ -44,11 +46,52 @@ struct SettingsPage: View {
                 case .environment: EnvironmentSettings(studio: studio)
                 case .externalModels: ExternalModelsSettings(models: studio.externalModels)
                 case .service: ServiceSettings(studio: studio)
+                case .appearance: AppearanceSettings()
                 case .shortcuts: ShortcutSettings()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+    }
+}
+
+private struct AppearanceSettings: View {
+    @AppStorage(WavePalette.preference) private var palette = WavePalette.teal
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("波形配色", selection: $palette) {
+                    ForEach(WavePalette.allCases) { option in
+                        HStack(spacing: 10) {
+                            swatch(option)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.title)
+                                Text(option.detail).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .tag(option)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+            } header: {
+                Text("时间轴")
+            } footer: {
+                Text("颜色较浅的外轮廓表示峰值，较深的主体表示平均响度。概览条使用同一配色。")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// The envelope colour behind a narrower body, as the waveform draws them.
+    private func swatch(_ option: WavePalette) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 3).fill(Color(nsColor: option.edge).opacity(WavePalette.edgeAlpha))
+            RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: option.body)).padding(.vertical, 5)
+        }
+        .frame(width: 36, height: 22)
+        .background(Tone.paper.color, in: RoundedRectangle(cornerRadius: 3))
+        .accessibilityHidden(true)
     }
 }
 

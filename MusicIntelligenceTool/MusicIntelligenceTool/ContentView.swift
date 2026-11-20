@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var showManualHint = false
     @State private var isDropTargeted = false
     @AppStorage("rulerBars") private var rulerBars = false
+    @AppStorage("navigatorHeight") private var navigatorHeight = TimelineNavigator.defaultHeight
     @AppStorage("reviewAutoAudition") private var autoAudition = false
     @AppStorage(CueEdge.entry.preference) private var inShortcut = CueEdge.entry.defaultKey
     @AppStorage(CueEdge.exit.preference) private var outShortcut = CueEdge.exit.defaultKey
@@ -111,13 +112,15 @@ struct ContentView: View {
                     HStack(spacing: 0) {
                         TrackGutter(studio: studio, record: song, bars: $rulerBars)
                         TimelineCanvas(studio: studio, song: song, window: window, bars: rulerBars,
-                                       inShortcut: inShortcut, outShortcut: outShortcut, onSelect: selectForReview, onResize: resize)
+                                       inShortcut: inShortcut, outShortcut: outShortcut, onSelect: selectForReview, onResize: resize,
+                                       onPan: { pan = $0 })
                     }
                     .frame(minHeight: 210, maxHeight: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(Tone.rule.color) }
                     if studio.zoom > 1 {
-                        TimelineNavigator(pan: $pan, window: window, duration: song.duration, peaks: studio.peaks)
+                        TimelineNavigator(pan: $pan, height: $navigatorHeight, window: window, duration: song.duration,
+                                          peaks: studio.peaks, studio: studio)
                             .padding(.leading, CanvasLayout.gutterWidth)
                     }
                     TransportBar(studio: studio, song: song, inShortcut: inShortcut, outShortcut: outShortcut, onAdd: add)
@@ -560,6 +563,8 @@ private struct TimelineCanvas: View {
     let outShortcut: String
     let onSelect: (Mark) -> Void
     let onResize: (String, Bool, Double) -> Void
+    let onPan: (Double) -> Void
+    @AppStorage(WavePalette.preference) private var palette = WavePalette.teal
 
     var body: some View {
         WaveformView(record: song, peaks: studio.peaks, visible: studio.visibleKinds, selected: studio.selected,
@@ -567,7 +572,8 @@ private struct TimelineCanvas: View {
                      inShortcut: inShortcut, outShortcut: outShortcut, onShortcut: studio.markPoint,
                      onMovePoint: studio.setPoint, onSeek: studio.seek, onPick: onSelect,
                      onRange: { studio.selection = $0; studio.seek($0.lowerBound) }, onResize: onResize, bars: bars,
-                     hiddenLanes: studio.hiddenLanes, laneScroll: studio.laneScroll, onLaneScroll: { studio.laneScroll = $0 })
+                     hiddenLanes: studio.hiddenLanes, laneScroll: studio.laneScroll, onLaneScroll: { studio.laneScroll = $0 },
+                     onPan: onPan, palette: palette)
             .accessibilityIdentifier("waveform")
             .help("在顶部时间尺点击或拖动可定位播放头；在波形上拖动可设置出入点。")
     }

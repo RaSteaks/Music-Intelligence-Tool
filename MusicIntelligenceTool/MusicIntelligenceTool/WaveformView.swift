@@ -85,6 +85,9 @@ struct WaveformView: NSViewRepresentable {
     var hiddenLanes: Set<String> = []
     var laneScroll = 0
     var onLaneScroll: (Int) -> Void = { _ in }
+    /// Receives the new scroll position (0...1, same scale as the navigator) after a horizontal swipe.
+    var onPan: (Double) -> Void = { _ in }
+    var palette = WavePalette.teal
 
     func makeNSView(context: Context) -> WaveCanvas {
         let view = WaveCanvas()
@@ -206,7 +209,7 @@ final class WaveCanvas: NSView {
             || old.peaks.count != new.peaks.count || old.visible != new.visible || old.selected != new.selected
             || old.inPoint != new.inPoint || old.outPoint != new.outPoint || old.window != new.window
             || old.bars != new.bars || old.snap != new.snap
-            || old.hiddenLanes != new.hiddenLanes || old.laneScroll != new.laneScroll
+            || old.hiddenLanes != new.hiddenLanes || old.laneScroll != new.laneScroll || old.palette != new.palette
     }
 
     /// A module that just finished fades its lanes in. This is the only motion not caused by the user.
@@ -507,12 +510,14 @@ final class WaveCanvas: NSView {
             let xx = CGFloat(col) + 0.5
             let h = max(0.5, min(1, peak) * half)
             outer.move(to: .init(x: xx, y: mid - h)); outer.line(to: .init(x: xx, y: mid + h))
-            let m = max(0.5, min(1, mean) * half)
+            // Scaled down so loud, heavily mastered passages still leave a visible band of peak envelope.
+            let m = max(0.5, min(1, mean) * half * 0.8)
             body.move(to: .init(x: xx, y: mid - m)); body.line(to: .init(x: xx, y: mid + m))
         }
-        // The light outline is the peak envelope; the darker body is the mean of the peaks in each column.
-        Tone.sound.ns.withAlphaComponent(0.35).setStroke(); outer.stroke()
-        Tone.sound.ns.setStroke(); body.stroke()
+        // The lighter envelope is the peak; the darker body (0.8 × the mean of the peaks in each column) sits inside it.
+        // One low-saturation hue keeps the waveform as background, so amber melody and emotion lines read on top.
+        i.palette.edge.withAlphaComponent(WavePalette.edgeAlpha).setStroke(); outer.stroke()
+        i.palette.body.setStroke(); body.stroke()
     }
 
     private func drawMarks(_ i: WaveformView, _ layout: CanvasLayout) {
@@ -654,6 +659,12 @@ final class WaveCanvas: NSView {
     override func scrollWheel(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         guard let i = input else { return super.scrollWheel(with: event) }
+        // A mostly horizontal swipe (or Shift + mouse wheel) pans the zoomed timeline anywhere on the canvas.
+        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+            laneScrollRemainder = 0
+            panTimeline(by: event.hasPreciseScrollingDeltas ? event.scrollingDeltaX : event.scrollingDeltaX * 40, in: i)
+            return
+        }
         let layout = laneLayout(i)
         guard layout.overflows, p.y >= layout.lanesTop else {
             laneScrollRemainder = 0
@@ -667,6 +678,15 @@ final class WaveCanvas: NSView {
         laneScrollRemainder -= CGFloat(step)
         let target = min(max(0, layout.firstLane + step), layout.lanes.count - layout.visibleCount)
         if target != layout.firstLane { i.onLaneScroll(target) }
+    }
+
+    /// Moves the visible window by `points` of canvas width, like dragging the content itself.
+    private func panTimeline(by points: CGFloat, in i: WaveformView) {
+        let span = i.window.upperBound - i.window.lowerBound
+        let travel = i.record.duration - span
+        guard travel > 0.001, bounds.width > 0, points != 0 else { return }
+        let start = min(travel, max(0, i.window.lowerBound - Double(points) * span / Double(bounds.width)))
+        if start != i.window.lowerBound { i.onPan(start / travel) }
     }
 
     private func drawHover(_ i: WaveformView) {
