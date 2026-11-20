@@ -199,6 +199,82 @@ struct CloudAnalysisTests {
         #expect(try await client.complete(request, style: .chat, context: question, task: .question).answer.findings.count == 1)
     }
 
+    @Test func savedSectionsLinkDetailedCloudFindingsAndEmotionMeasurements() async throws {
+        let fixture = try await CloudFixture(); defer { fixture.stop() }
+        let song = try fixture.song(seconds: 2)
+        let keys = TestCredentials()
+        let studio = Studio(root: fixture.root.appendingPathComponent("library"), credentials: keys)
+        try studio.open(URL(fileURLWithPath: song.path))
+        let window = Mark(kind: "emotion", start: 0.25, end: 0.75, source: "Music2Emo",
+                          fields: ["label": ReviewedText(suggested: "平静")], metrics: ["arousal": 3, "valence": 5],
+                          modelTags: ["calm", "background"])
+        studio.edit { record in
+            record.split(record.sections[0].id, at: 1)
+            record.marks.append(window)
+        }
+        let connection = fixture.connection(path: "/details/v1")
+        try studio.externalModels.save(connection, newKey: "fixture-key")
+        studio.startCloud(connectionID: connection.id, task: .interpretation, range: AnalysisRange(start: 0, end: 1))
+        try await waitForCloud(studio)
+        let reopened = Studio(root: studio.root, credentials: keys)
+        try reopened.open(URL(fileURLWithPath: song.path))
+        let saved = try #require(reopened.song)
+        let firstID = saved.sections[0].id
+        let detail = try #require(saved.sectionAnalyses?[firstID])
+        let insights = saved.marks.filter { detail.insightIDs.contains($0.id) }
+        #expect(Set(insights.compactMap { $0.fields["category"]?.value }) == ["emotion", "section"])
+        #expect(insights.allSatisfy { $0.fields["content"]?.origin?.evidenceIDs == [firstID] })
+        #expect(insights.contains { $0.fields["content"]?.value == "前半段旋律与后半段重复，段尾留出间歇。" })
+        #expect(detail.emotionWindowIDs == [window.id] && detail.summary.contains("平静"))
+        #expect(detail.metrics["mean_valence"] == 5 && detail.metrics["coverage_arousal"] == 0.5)
+        #expect(saved.sectionAnalyses?[saved.sections[1].id]?.insightIDs == [])
+        reopened.edit { record in record.marks.removeAll { $0.id == window.id } }
+        let updated = try #require(reopened.song?.sectionAnalyses?[firstID])
+        #expect(updated.emotionWindowIDs.isEmpty && updated.insightIDs.isEmpty && updated.metrics["mean_valence"] == nil)
+    }
+
+    @Test func denseSelectionFitsOneRequestAndKeepsReviewedEvidence() async throws {
+        let fixture = try await CloudFixture(); defer { fixture.stop() }
+        let song = try fixture.song()
+        let studio = Studio(root: fixture.root.appendingPathComponent("library"), credentials: TestCredentials())
+        try studio.open(URL(fileURLWithPath: song.path))
+        let connection = fixture.connection()
+        try studio.externalModels.save(connection, newKey: "fixture-key")
+        let range = AnalysisRange(start: 0, end: 1)
+        let options = CloudTaskOptions()
+        let reviewed = Mark(kind: "beat", start: 0, end: 0, source: "fixture", startConfirmed: true,
+                            fields: ["label": ReviewedText(confirmed: "", hint: "保留此拍")])
+        studio.edit { record in
+            record.marks.append(reviewed)
+            for index in 0..<5000 {
+                let time = Double(index) / 5000
+                record.marks.append(Mark(kind: "beat", start: time, end: time, source: "fixture", metrics: ["local_bpm": 120]))
+            }
+        }
+        let original = try #require(studio.song)
+        #expect(try original.cloudContext(in: range, options: options).data().count > 512 * 1024)
+        studio.startCloud(connectionID: connection.id, task: .interpretation, range: range)
+        try await waitForCloud(studio)
+        let run = try #require(studio.song?.cloudRuns?.last)
+        let sent = try JSONDecoder().decode(CloudContext.self, from: Data(contentsOf: fixture.root.appendingPathComponent("contexts.jsonl")))
+        #expect(run.status == "完成" && sent.range == range)
+        #expect(try sent.data() == run.context?.data())
+        #expect(try sent.data().count <= 512 * 1024)
+        let beats = sent.items.filter { $0.kind == "beat" }
+        #expect(sent.omittedDetailCounts?["beat"] == 5001 - beats.count)
+        #expect(beats.contains { $0.id == reviewed.id && $0.fields["label"]?.confirmed == "" && $0.fields["label"]?.hint == "保留此拍" })
+        #expect(beats.contains { $0.start > 0.99 })
+        #expect(studio.song?.marks.filter { $0.kind == "beat" }.count == 5001)
+        studio.startCloud(connectionID: connection.id, task: .interpretation, range: range)
+        try await waitForCloud(studio)
+        #expect(requestCount(fixture) == 1)
+
+        studio.edit { $0.marks.append(.manual("note", from: 0, to: 1, label: String(repeating: "注", count: 180_000))) }
+        studio.startCloud(connectionID: connection.id, task: .interpretation, range: range)
+        try await waitForCloud(studio)
+        #expect(studio.notice?.contains("512 KB") == true && requestCount(fixture) == 1)
+    }
+
     @Test func analysisReviewLifecyclePreservesEditsAndAvoidsRepeatedRequests() async throws {
         let fixture = try await CloudFixture(); defer { fixture.stop() }
         let input = try fixture.song()

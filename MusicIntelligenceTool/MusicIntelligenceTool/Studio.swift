@@ -195,6 +195,9 @@ final class Studio {
             let previousCloudStatus = record.cloudRuns?.map(\.status)
             let previousBatchStatus = record.cloudBatches?.map(\.status)
             let previousMarks = record.marks
+            for index in record.marks.indices where record.marks[index].kind == "emotion" {
+                record.marks[index].describeMusic2EmoWindow()
+            }
             for (key, state) in record.status where state == "分析中" { record.status[key] = "已中断" }
             for index in record.cloudRuns?.indices ?? 0..<0 {
                 if ["准备中", "分析中"].contains(record.cloudRuns?[index].status ?? "") {
@@ -207,13 +210,12 @@ final class Studio {
                 record.cloudBatches?[index].message = "批次已中断；已完成片段保留，重新运行可复用有效缓存。"
             }
             record.reconcileCloudResults()
-            needsSave = record.status != previousStatus || record.cloudRuns?.map(\.status) != previousCloudStatus || record.cloudBatches?.map(\.status) != previousBatchStatus || record.marks != previousMarks
+            needsSave = record.sectionAnalyses == nil || record.status != previousStatus || record.cloudRuns?.map(\.status) != previousCloudStatus || record.cloudBatches?.map(\.status) != previousBatchStatus || record.marks != previousMarks
         } else if path == Bundle.main.url(forResource: "Study", withExtension: "wav")?.standardizedFileURL.resolvingSymlinksInPath(),
                   let example = Bundle.main.url(forResource: "Study", withExtension: "json") {
             record.marks = try JSONDecoder().decode(SongRecord.self, from: Data(contentsOf: example)).marks
         }
-        // Opening a saved record is read-only unless interrupted/stale analysis
-        // needs recovery. A new revision otherwise misrepresents a user edit.
+        // Save only when recovery or a legacy result upgrade changed the record.
         if needsSave { try record.save(in: root) }
         player?.stop()
         player = audio
@@ -791,13 +793,14 @@ final class Studio {
         defer { try? FileManager.default.removeItem(at: directory) }
         do {
             try Task.checkCancellation()
-            let context = snapshot.cloudContext(in: range, options: options)
-            let fingerprint = try snapshot.cloudInputFingerprint(in: range, options: options)
+            let input = try snapshot.preparedCloudInput(in: range, options: options)
+            let context = input.context
+            let fingerprint = try snapshot.cloudInputFingerprint(data: input.data, options: options)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             var run = CloudRun(task: task, provider: connection.provider.rawValue, model: connection.model,
                                range: range, inputRevision: snapshot.revision, inputFingerprint: fingerprint)
             run.context = context; run.options = options; run.batchID = batchID
-            run.promptVersion = "music-insights-v2"
+            run.promptVersion = "music-insights-v3"
             run.endpointHost = try connection.endpoint(connection.apiStyle.path).host
             runID = run.id
             try updateCloudRecord { record in
@@ -931,6 +934,7 @@ final class Studio {
             let p = try Runtime.process("music_mcp", args: [root.path])
             let port = mcpPort
             p.environment?["MIT_MCP_PORT"] = String(port)
+            p.environment?["MIT_MCP_OWNER_PID"] = String(ProcessInfo.processInfo.processIdentifier)
             let requests = Pipe(), replies = Pipe()
             p.standardOutput = requests
             p.standardInput = replies

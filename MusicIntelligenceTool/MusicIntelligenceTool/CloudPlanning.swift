@@ -120,12 +120,13 @@ extension SongRecord {
         sectionMetrics(in: [range])
     }
 
-    func sectionMetrics(in ranges: [AnalysisRange], containedSamplesOnly: Bool = false) -> [String: Double] {
+    func sectionMetrics(in ranges: [AnalysisRange], containedSamplesOnly: Bool = false, includingEmotion: Bool = false) -> [String: Double] {
         let selected = Self.mergedRanges(ranges)
         let duration = selected.reduce(0) { $0 + $1.duration }
         guard duration > 0 else { return [:] }
         var result: [String: Double] = [:]
-        let measurements = ["short_lufs", "rms", "low_share", "onsets_per_s", "centroid_hz"].map { ("acoustic", $0) } + [("tempo", "tempo_bpm"), ("pitch", "midi_pitch")]
+        var measurements = ["short_lufs", "rms", "low_share", "onsets_per_s", "centroid_hz"].map { ("acoustic", $0) } + [("tempo", "tempo_bpm"), ("pitch", "midi_pitch")]
+        if includingEmotion { measurements += [("emotion", "valence"), ("emotion", "arousal")] }
         for (kind, key) in measurements {
             let samples = marks.filter { row in
                 row.kind == kind && row.analysisStale != true && selected.contains { scope in

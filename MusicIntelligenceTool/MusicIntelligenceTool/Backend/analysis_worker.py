@@ -1,6 +1,7 @@
 """One job, one JSON result. Native model logs never share the result channel."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -119,6 +120,17 @@ def align(audio, start, record, end):
     return {"marks": rows}
 
 
+def emotion_windows(start, end, sections):
+    for lo, hi in sorted(sections) or [(start, end)]:
+        lo, hi = max(lo, start), min(hi, end)
+        if hi - lo < 1:
+            continue
+        # Equal windows retain short tails and never cross a section boundary.
+        count = math.ceil((hi - lo) / 10)
+        edges = [lo + (hi - lo) * i / count for i in range(count)] + [hi]
+        yield from zip(edges, edges[1:])
+
+
 def emotions(source, start, end, runtime, scratch, sections):
     repo = runtime / ".models/Music2Emotion"
     if not repo.is_dir():
@@ -131,19 +143,16 @@ def emotions(source, start, end, runtime, scratch, sections):
     from music2emo import Music2emo
     model = Music2emo()
     rows = []
-    for lo, hi in sections or [(start, end)]:
-        t, hi = max(lo, start), min(hi, end)
-        while t < hi:
-            stop = min(t + 30, hi)
-            if stop-t < 1:
-                break
-            clip = scratch/"window.wav"
-            cut(source, clip, t, stop-t)
-            values = model.predict(str(clip))
-            label = "、".join(values["predicted_moods"][:2])
-            rows.append(mark("emotion", t, stop, "Music2Emo", label,
-                             {"valence": values["valence"], "arousal": values["arousal"]}))
-            t = stop
+    for lo, hi in emotion_windows(start, end, sections):
+        clip = scratch/"window.wav"
+        cut(source, clip, lo, hi - lo)
+        values = model.predict(str(clip))
+        # Music2Emo returns thresholded mood AND theme tags in vocabulary order.
+        # Keep them all so the app can distinguish mood from use or setting.
+        row = mark("emotion", lo, hi, "Music2Emo", "、".join(values["predicted_moods"]),
+                   {"valence": values["valence"], "arousal": values["arousal"]})
+        row["modelTags"] = values["predicted_moods"]
+        rows.append(row)
     return {"marks": rows}
 
 

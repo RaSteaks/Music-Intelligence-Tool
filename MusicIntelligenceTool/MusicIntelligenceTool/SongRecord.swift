@@ -23,6 +23,7 @@ struct Mark: Codable, Identifiable, Equatable {
     var metrics: [String: Double] = [:]
     var analysisStale: Bool?
     var relatedIDs: [String]?
+    var modelTags: [String]?
 
     var label: String {
         if let confirmed = fields["label"]?.confirmed { return confirmed }
@@ -82,6 +83,54 @@ enum ReviewStatus {
     }
 }
 
+extension Mark {
+    // This subset of Music2Emo's mood/theme vocabulary describes a listening
+    // impression. Usage, seasonal and genre tags remain in the raw model output.
+    private static let moodNames = [
+        "calm": "平静", "cool": "冷峻", "dark": "暗沉", "deep": "深沉", "dramatic": "戏剧感",
+        "dream": "梦幻", "emotional": "感性", "energetic": "充满活力", "epic": "恢宏",
+        "fun": "轻快有趣", "funny": "诙谐", "groovy": "律动感", "happy": "欢快", "heavy": "厚重",
+        "hopeful": "充满希望", "inspiring": "振奋", "love": "爱意", "meditative": "沉静",
+        "melancholic": "惆怅", "motivational": "激昂", "positive": "积极", "powerful": "有力量",
+        "relaxing": "放松", "romantic": "浪漫", "sad": "忧伤", "sexy": "性感", "soft": "柔和",
+        "upbeat": "轻快", "uplifting": "昂扬"
+    ]
+
+    mutating func describeMusic2EmoWindow() {
+        guard kind == "emotion", source == "Music2Emo" else { return }
+        let raw = fields["label"]?.suggested ?? ""
+        let tags = raw.components(separatedBy: "、").filter { !$0.isEmpty }
+        let rawLabel = tags.allSatisfy { $0.allSatisfy(\.isASCII) }
+        if modelTags == nil {
+            // Earlier releases stored English tokens in the label or in a
+            // generated content line. User-confirmed prose is never parsed.
+            let prefix = "模型原始标签（含主题与用途）："
+            if rawLabel, !raw.isEmpty { modelTags = tags }
+            else if let line = fields["content"]?.suggested?.components(separatedBy: "\n").first(where: { $0.hasPrefix(prefix) }) {
+                modelTags = String(line.dropFirst(prefix.count)).components(separatedBy: "、").filter { !$0.isEmpty }
+            }
+        }
+        guard rawLabel, analysisStale != true, fields["label"]?.rejected != true,
+              let valence = metrics["valence"], let arousal = metrics["arousal"] else { return }
+
+        let tone = valence < 4 ? "偏低沉" : valence > 6 ? "偏明朗" : "情绪色彩居中"
+        let energy = arousal < 4 ? "较舒缓" : arousal > 6 ? "较激动" : "激动程度适中"
+        let moods = tags.compactMap { Self.moodNames[$0] }
+        fields["label", default: ReviewedText()].suggested = moods.isEmpty
+            ? "\(tone) · \(energy)" : moods.prefix(3).joined(separator: "、")
+        if fields["mood"]?.suggested == nil {
+            fields["mood", default: ReviewedText()].suggested = String(
+                format: "%@（效价 %.1f/9），%@（唤醒度 %.1f/9）", tone, valence, energy, arousal)
+        }
+        if fields["content"]?.suggested == nil {
+            var detail: [String] = []
+            if !moods.isEmpty { detail.append("听感候选：" + moods.joined(separator: "、")) }
+            if !raw.isEmpty { detail.append("模型原始标签（含主题与用途）：" + raw) }
+            if !detail.isEmpty { fields["content", default: ReviewedText()].suggested = detail.joined(separator: "\n") }
+        }
+    }
+}
+
 enum AnalysisJob: String, CaseIterable, Identifiable {
     case structure, acoustics, rhythm, harmony, repetition, melody, lyrics, emotion, events, alignment
     var id: Self { self }
@@ -131,6 +180,13 @@ struct AnalysisCoverage: Codable, Equatable {
     var end: Double
 }
 
+struct SectionAnalysis: Codable, Equatable {
+    var summary: String
+    var metrics: [String: Double]
+    var emotionWindowIDs: [String]
+    var insightIDs: [String]
+}
+
 struct SongRecord: Codable {
     var schemaVersion = 1
     var revision = 0
@@ -147,6 +203,7 @@ struct SongRecord: Codable {
     var warnings: [String: [String]]?
     var coverage: [String: [AnalysisCoverage]]?
     var completedRanges: [String: AnalysisRange]?
+    var sectionAnalyses: [String: SectionAnalysis]?
 
     var sections: [Mark] { marks.filter { $0.kind == "section" }.sorted { $0.start < $1.start } }
 
@@ -236,7 +293,7 @@ struct SongRecord: Codable {
         let keepSections = sections.contains(where: \.reviewed)
         // A late result only owns its module and interval. Reviewed fields retain their originals.
         let existing = marks.filter { job.kinds.contains($0.kind) && $0.overlaps(range) }
-        let refreshable = [AnalysisJob.events, .rhythm, .harmony, .repetition, .melody].contains(job)
+        let refreshable = [AnalysisJob.events, .rhythm, .harmony, .repetition, .melody, .emotion].contains(job)
         let oldRhythmBeats = marks.filter { $0.kind == "rhythm_beat" }.map(\.start)
         // Constant interval candidates can retain their unanalysed portions.
         // Whole-range summaries and phrases cannot be trimmed this way.
@@ -252,6 +309,7 @@ struct SongRecord: Codable {
         marks += remaining
         for item in result.marks where item.start >= range.lowerBound && item.start < range.upperBound {
             var row = item
+            if job == .emotion { row.describeMusic2EmoWindow() }
             row.end = min(row.end, range.upperBound)
             if job == .harmony && !full && row.kind == "key" { row.kind = "key_region" }
             if row.kind == "section" && (keepSections || !full) { continue }
@@ -263,6 +321,10 @@ struct SongRecord: Codable {
                    let index = marks.firstIndex(where: { $0.id == old.id }) {
                     for (field, value) in row.fields {
                         marks[index].fields[field, default: ReviewedText()].suggested = value.suggested
+                    }
+                    if row.kind == "emotion" {
+                        marks[index].modelTags = row.modelTags
+                        if row.fields["content"] == nil { marks[index].fields["content"]?.suggested = nil }
                     }
                     marks[index].metrics = row.metrics
                     marks[index].source = row.source
@@ -373,6 +435,24 @@ struct SongRecord: Codable {
         return covered >= (range.upperBound - range.lowerBound) * 0.25 && covered > 0 ? weighted / covered : nil
     }
 
+    private func analysis(for section: Mark) -> SectionAnalysis {
+        let range = AnalysisRange(start: section.start, end: section.end)
+        var scoped = self
+        scoped.marks = marks.filter { $0.overlaps(range.interval) }
+        let related = scoped.marks.filter { $0.kind == "emotion" || $0.kind == "insight" }
+            .sorted { ($0.start, $0.id) < ($1.start, $1.id) }
+        let windows = related.filter { $0.kind == "emotion" && ($0.analysisStale != true || $0.fields["label"]?.confirmed != nil) }
+        let insights = related.filter { row in
+            guard row.kind == "insight", ["label", "content"].contains(where: { row.fields[$0]?.value?.isEmpty == false }) else { return false }
+            let category = row.fields["category"]?.value
+            return category == "emotion" || category == "section" ||
+                (category == "summary" && row.fields["content"]?.origin?.evidenceIDs.contains(section.id) == true)
+        }
+        return SectionAnalysis(summary: scoped.summary(for: section),
+                               metrics: scoped.sectionMetrics(in: [range], includingEmotion: true),
+                               emotionWindowIDs: windows.map(\.id), insightIDs: insights.map(\.id))
+    }
+
     func agentMessage(mcpEndpoint: String) throws -> String {
         // The manual fallback preserves the same complete record as the MCP handoff.
         let encoder = JSONEncoder()
@@ -397,9 +477,10 @@ struct SongRecord: Codable {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var next = self
         next.reconcileCloudResults()
-        if next.cloudBatches != nil || next.coverage != nil || next.completedRanges != nil || next.cloudRuns?.contains(where: { $0.options != nil }) == true {
-            next.schemaVersion = max(next.schemaVersion, 3)
-        } else if next.cloudRuns != nil { next.schemaVersion = max(next.schemaVersion, 2) }
+        // Rebuild after stale-result reconciliation, in the same atomic write
+        // as the marks. Moving a boundary or deleting a finding updates its links.
+        next.sectionAnalyses = Dictionary(uniqueKeysWithValues: next.sections.map { ($0.id, next.analysis(for: $0)) })
+        next.schemaVersion = max(next.schemaVersion, 4)
         next.revision += 1
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]

@@ -63,6 +63,14 @@ class Handler(BaseHTTPRequestHandler):
         result = {"findings": [{"category": "summary", "start": context["range"]["start"],
                                  "end": context["range"]["end"], "label": "测试分析候选 · " + body["model"], "content": "固定测试响应，供校对流程验证。",
                                  "uncertainty": "非真实音乐判断", "evidenceIDs": evidence}]}
+        if "/details/" in self.path:
+            result["findings"] = [
+                {**result["findings"][0], "category": category, "content": description}
+                for category, description in (
+                    ("section", "前半段旋律与后半段重复，段尾留出间歇。"),
+                    ("emotion", "段尾唤醒度上升，听感从舒缓转向活跃。"),
+                )
+            ]
         usage = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cost": 0.001}
         if responses:
             self.reply(200, {"status": "completed", "model": body["model"] + "-v1", "provider": "fixture",

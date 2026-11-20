@@ -79,15 +79,21 @@ struct SegmentOverview: View {
         let groups = ["lyric", "emotion", "event", "note"].map { kind in
             (kind: kind, items: CatalogCategory.items(kind, in: song).filter { $0.overlaps(section.start..<section.end) })
         }.filter { !$0.items.isEmpty }
-        let summary = song.summary(for: section)
+        let analysis = song.sectionAnalyses?[section.id]
+        let summary = analysis?.summary ?? song.summary(for: section)
+        let insightIDs = Set(analysis?.insightIDs ?? [])
+        let interpretations = CatalogCategory.items("insight", in: song).filter { insightIDs.contains($0.id) }
         VStack(alignment: .leading, spacing: 8) {
             Text("片段概览").font(.headline).accessibilityAddTraits(.isHeader)
             if !summary.isEmpty { Text(summary).font(.callout).textSelection(.enabled) }
-            if groups.isEmpty {
+            if groups.isEmpty && interpretations.isEmpty {
                 Text("此段还没有歌词、情绪、事件或注释。").font(.caption).foregroundStyle(.secondary)
             }
             ForEach(groups, id: \.kind) { group in
                 RelatedRecords(title: CatalogCategory.title(group.kind), items: group.items, onSelect: onSelect)
+            }
+            if !interpretations.isEmpty {
+                RelatedRecords(title: "段落与情绪解读", items: interpretations, onSelect: onSelect)
             }
         }
         .accessibilityIdentifier("segmentOverview")

@@ -18,6 +18,12 @@ import music_mcp as api
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_emotion_windows_respect_sections_and_selection(self):
+        windows = list(worker.emotion_windows(4, 31, [(19, 35), (0, 19)]))
+        self.assertEqual(windows, [(4, 11.5), (11.5, 19), (19, 25), (25, 31)])
+        self.assertEqual(list(worker.emotion_windows(7, 17.2, [])), [(7, 12.1), (12.1, 17.2)])
+        self.assertEqual(list(worker.emotion_windows(0, 0.8, [])), [])
+
     def test_model_assets_preserve_verified_cache_and_checks_stay_offline(self):
         with tempfile.TemporaryDirectory() as temp:
             source, target = Path(temp)/"remote.bin", Path(temp)/"cache/model.bin"
@@ -111,6 +117,49 @@ class AnalysisTests(unittest.TestCase):
 
 
 class MCPTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "The app uses macOS process-exit notifications")
+    async def test_killed_app_releases_idle_mcp_listener(self):
+        import os
+        import signal
+
+        with tempfile.TemporaryDirectory() as root, socket.socket() as replacement:
+            replacement.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            with socket.socket() as unused:
+                unused.bind(("127.0.0.1", 0))
+                address = unused.getsockname()
+            # The launcher owns the child just as Studio does. Its isolated
+            # process group also lets a failing regression clean up both.
+            launcher = ("import os, subprocess, sys\n"
+                        "os.environ['MIT_MCP_OWNER_PID'] = str(os.getpid())\n"
+                        "sys.exit(subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE).wait())")
+            app = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", launcher, sys.executable, str(APP/"Backend/music_mcp.py"), root,
+                env=dict(os.environ, MIT_MCP_PORT=str(address[1])), stdout=subprocess.PIPE,
+                start_new_session=True)
+            try:
+                for _ in range(200):
+                    try:
+                        _, writer = await asyncio.open_connection(*address)
+                        writer.close()
+                        await writer.wait_closed()
+                        break
+                    except ConnectionRefusedError:
+                        await asyncio.sleep(0.05)
+                else:
+                    self.fail("MCP listener did not start")
+                app.kill()
+                # The server inherited the launcher's stdout. EOF proves both
+                # processes actually exited, even without an analyze_music call.
+                self.assertEqual(await asyncio.wait_for(app.stdout.read(), 5), b"")
+                replacement.bind(address)
+                replacement.listen()
+            finally:
+                try:
+                    os.killpg(app.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await asyncio.wait_for(app.wait(), 5)
+
     async def test_http_discovery_import_overview_and_filtered_timeline(self):
         import os
         import httpx
@@ -141,6 +190,13 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             reviewed_rhythm["analysisStale"] = True
             reviewed_rhythm["fields"]["meter"] = {"confirmed": "4/4"}
             song["marks"].extend([stale_emotion, reviewed_rhythm])
+            window = worker.mark("emotion", 15, 16, "Music2Emo", "平静", {"arousal": 3})
+            window["modelTags"] = ["background", "calm"]
+            song["marks"].append(window)
+            song["sectionAnalyses"] = {song["marks"][0]["id"]: {
+                "summary": "主要听感 · 平静", "metrics": {"mean_arousal": 3},
+                "emotionWindowIDs": [window["id"]], "insightIDs": [],
+            }}
             song["marks"][0]["fields"]["mood"]["hint"] = "需试听"
             (root/track).mkdir()
             (root/track/"analysis.json").write_text(json.dumps(song))
@@ -172,6 +228,9 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(overview.isError, overview.content)
                         self.assertIsNotNone(overview.structuredContent, overview.content)
                         self.assertEqual(overview.structuredContent["revision"],1)
+                        self.assertEqual(overview.structuredContent["section_analyses"], song["sectionAnalyses"])
+                        mood = next(item for item in overview.structuredContent["emotions"] if item["id"] == window["id"])
+                        self.assertEqual(mood["model_tags"], ["background", "calm"])
                         self.assertNotIn(stale_emotion["id"], [item["id"] for item in overview.structuredContent["emotions"]])
                         expected_meter = {"meter": {"value": "4/4", "source": "user"}}
                         self.assertEqual(overview.structuredContent["rhythm"][0]["fields"], expected_meter)

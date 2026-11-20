@@ -4,6 +4,40 @@ import Testing
 
 @MainActor
 struct AudioDropTests {
+    @Test func emotionWindowsRetainModelEvidenceAndLegacyCorrections() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var record = SongRecord(url: fixture.first, duration: 48)
+        let old = Mark(kind: "emotion", start: 0, end: 16, source: "Music2Emo",
+                       fields: ["label": ReviewedText(suggested: "advertising、calm", confirmed: "", hint: "再听段尾")],
+                       metrics: ["valence": 5.2, "arousal": 3.1])
+        record.marks.append(old)
+        try record.save(in: fixture.library)
+        let studio = Studio(root: fixture.library)
+        try studio.open(fixture.first)
+        let upgraded = try #require(studio.song?.marks.first { $0.id == old.id })
+        #expect(upgraded.label == "" && upgraded.fields["label"]?.hint == "再听段尾")
+        #expect(upgraded.fields["label"]?.suggested == "平静")
+        #expect(upgraded.fields["mood"]?.value?.contains("较舒缓") == true)
+        #expect(upgraded.fields["content"]?.value?.contains("advertising、calm") == true)
+        #expect(upgraded.modelTags == ["advertising", "calm"])
+        let reopened = Studio(root: fixture.library)
+        try reopened.open(fixture.first)
+        #expect(reopened.song?.revision == studio.song?.revision)
+
+        let fresh = Mark(kind: "emotion", start: 16, end: 24, source: "Music2Emo",
+                         fields: ["label": ReviewedText(suggested: "advertising、background、dream、happy、hopeful、uplifting")],
+                         metrics: ["valence": 6.7, "arousal": 5.8])
+        var themeOnly = fresh
+        themeOnly.id = UUID().uuidString
+        themeOnly.start = 24; themeOnly.end = 32
+        themeOnly.fields["label"] = ReviewedText(suggested: "christmas")
+        record.apply(JobResult(marks: [fresh, themeOnly]), job: .emotion, range: 16..<32)
+        let windows = record.marks.filter { $0.kind == "emotion" && $0.start >= 16 }
+        #expect(windows.map(\.label) == ["梦幻、欢快、充满希望", "偏明朗 · 激动程度适中"])
+        #expect(windows.first?.fields["content"]?.value?.contains("昂扬") == true)
+    }
+
     @Test func importSwitchAndReopenPreserveEdits() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

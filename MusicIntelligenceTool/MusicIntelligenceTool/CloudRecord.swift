@@ -63,6 +63,8 @@ struct CloudRun: Codable, Identifiable {
 /// Only task-relevant data crosses the cloud boundary. Paths, credentials and
 /// unrelated marks never appear in this representation.
 struct CloudContext: Codable {
+    static let maximumBytes = 512 * 1024
+    static let detailKinds: Set<String> = ["acoustic", "beat", "rhythm_beat", "downbeat", "onset", "word", "tempo", "melody_note"]
     struct Item: Codable {
         struct Field: Codable {
             var suggested: String?
@@ -88,6 +90,7 @@ struct CloudContext: Codable {
     var missingRanges: [AnalysisRange]?
     var warnings: [String: [String]]?
     var coverage: [String: [AnalysisCoverage]]?
+    var omittedDetailCounts: [String: Int]?
 
     func data() throws -> Data {
         let encoder = JSONEncoder()
@@ -97,6 +100,7 @@ struct CloudContext: Codable {
 }
 
 struct CloudFinding: Codable {
+    static let categories = ["summary", "section", "instrument", "arrangement", "emotion", "lyric", "event"]
     var category: String
     var start: Double
     var end: Double
@@ -110,14 +114,14 @@ struct CloudAnswer: Codable {
     var findings: [CloudFinding]
 
     func validated(context: CloudContext, task: CloudTaskKind) throws -> CloudAnswer {
-        let categories: Set<String> = ["summary", "instrument", "arrangement", "emotion", "lyric", "event"]
         let evidence = Set(context.items.map(\.id)).union(context.audioReferences?.map(\.id) ?? (task == .audio ? ["audio"] : []))
         guard findings.count <= 100 else { throw CloudError.invalidResult("分析条目超过上限。") }
         for finding in findings {
-            guard categories.contains(finding.category), finding.start.isFinite, finding.end.isFinite,
+            guard CloudFinding.categories.contains(finding.category), finding.start.isFinite, finding.end.isFinite,
                   finding.start >= context.range.start, finding.end <= context.range.end,
                   finding.start < finding.end,
                   !finding.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !(["emotion", "section"].contains(finding.category) && finding.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
                   finding.label.count <= 200, finding.content.count <= 6000, finding.uncertainty.count <= 2000,
                   !finding.evidenceIDs.isEmpty, Set(finding.evidenceIDs).isSubset(of: evidence) else {
                 throw CloudError.invalidResult("模型返回了越界时间、无效字段或无法定位的证据。")
@@ -140,7 +144,7 @@ extension SongRecord {
         let compact = options?.compactContext == true
         let items = marks.filter { row in
             guard (row.kind != "insight" || dependencies.contains(row.id)), row.kind != "pitch",
-                  !(compact && ["acoustic", "beat", "rhythm_beat", "downbeat", "onset", "word", "tempo", "melody_note"].contains(row.kind)) else { return false }
+                  !(compact && CloudContext.detailKinds.contains(row.kind)) else { return false }
             // Text and interval measurements cannot be split across disjoint
             // selections. Integrated loudness always belongs to its full span.
             if usesExplicitScopes || row.kind == "loudness" { return scopes.contains { $0.contains(row) } }
@@ -174,8 +178,41 @@ extension SongRecord {
                             })
     }
 
+    func preparedCloudInput(in range: AnalysisRange, options: CloudTaskOptions?) throws -> (context: CloudContext, data: Data) {
+        var context = cloudContext(in: range, options: options)
+        var data = try context.data()
+        guard data.count > CloudContext.maximumBytes else { return (context, data) }
+
+        let reviewedIDs = Set(marks.lazy.filter { $0.reviewed || $0.source == "user" }.map(\.id))
+        var omitted: [String: Int] = [:]
+        // Items are chronological. Thin each dense series independently so the
+        // end of the selection is represented even when the beginning is busy.
+        // Section statistics were computed from the full-resolution record.
+        while data.count > CloudContext.maximumBytes {
+            var seen: [String: Int] = [:]
+            let previousCount = context.items.count
+            context.items.removeAll { item in
+                guard CloudContext.detailKinds.contains(item.kind), !reviewedIDs.contains(item.id) else { return false }
+                seen[item.kind, default: 0] += 1
+                guard seen[item.kind, default: 0] % 2 == 1 else { return false }
+                omitted[item.kind, default: 0] += 1
+                return true
+            }
+            guard context.items.count < previousCount else {
+                throw CloudError.configuration("所选范围的必要分析记录仍超过 512 KB，请缩小选区。")
+            }
+            context.omittedDetailCounts = omitted
+            data = try context.data()
+        }
+        return (context, data)
+    }
+
     func cloudInputFingerprint(in range: AnalysisRange, options: CloudTaskOptions? = nil) throws -> String {
-        var data = try cloudContext(in: range, options: options).data()
+        try cloudInputFingerprint(data: preparedCloudInput(in: range, options: options).data, options: options)
+    }
+
+    func cloudInputFingerprint(data: Data, options: CloudTaskOptions?) throws -> String {
+        var data = data
         // The audio digest is computed for cache reuse before uploading. The
         // file stamp also catches ordinary in-place edits during a live task.
         let attributes = try FileManager.default.attributesOfItem(atPath: path)

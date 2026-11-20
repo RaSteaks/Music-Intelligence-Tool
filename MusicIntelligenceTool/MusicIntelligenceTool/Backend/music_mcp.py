@@ -45,6 +45,8 @@ def effective(row, confirmed_only=False):
             "end_source": "user" if row["endConfirmed"] else row["source"], "fields": fields}
     if not confirmed_only:
         item.update(hints=hints, metrics={} if row.get("analysisStale") else row["metrics"])
+        if "modelTags" in row and not row.get("analysisStale") and not row["fields"].get("label", {}).get("rejected"):
+            item["model_tags"] = row["modelTags"]
     if row.get("analysisStale"):
         item["analysis_stale"] = True
     if row.get("relatedIDs"):
@@ -78,6 +80,7 @@ def get_music_overview(track_id: str) -> dict[str, object]:
     return {"track_id": track_id, "revision": song["revision"], "duration_s": song["duration"],
             "bpm": song.get("bpm"), "key": song.get("key"), "status": song["status"],
             "sections": [item for m in sorted(song["marks"], key=lambda r: r["start"]) if m["kind"] == "section" and (item := effective(m)) is not None],
+            "section_analyses": song.get("sectionAnalyses") or {},
             "emotions": [item for m in song["marks"] if m["kind"] == "emotion" and (item := effective(m)) is not None],
             "insights": [item for m in song["marks"] if m["kind"] == "insight" and (item := effective(m)) is not None],
             "cloud_runs": [{key: value for key, value in run.items() if key != "context"}
@@ -121,10 +124,36 @@ def get_music_timeline(track_id: str, start_s: float, end_s: float, types: list[
     return {"track_id": track_id, "revision": song["revision"], "status": song["status"], "items": items}
 
 
+def watch_app_exit(owner_pid):
+    import select
+
+    # Xcode Stop may kill the App before its shutdown handler can run. Register
+    # before binding, using the launching App's PID even if already reparented.
+    if os.getppid() != owner_pid:
+        raise SystemExit(0)
+    events = select.kqueue()
+    try:
+        events.control([select.kevent(owner_pid, filter=select.KQ_FILTER_PROC,
+                                      flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                      fflags=select.KQ_NOTE_EXIT)], 0, 0)
+    except ProcessLookupError:
+        raise SystemExit(0)
+
+    def wait_for_exit():
+        events.control(None, 1)
+        # Swift is the only writer. Once it is gone even a long-lived HTTP
+        # session cannot finish a bridge request; release the listener now.
+        os._exit(0)
+
+    threading.Thread(target=wait_for_exit, daemon=True).start()
+
+
 if __name__ == "__main__":
     import asyncio
     import uvicorn
 
+    if owner := os.getenv("MIT_MCP_OWNER_PID"):
+        watch_app_exit(int(owner))
     # stdout is the Swift command pipe. HTTP access logs must never be parsed as App requests.
     app = server.streamable_http_app()
     config = uvicorn.Config(app, host=server.settings.host, port=server.settings.port,
