@@ -168,6 +168,18 @@ final class WorkspaceUITests: XCTestCase {
         XCTAssertEqual(try seconds(from: secondTime), 24, accuracy: 0.1)
         app.typeKey("o", modifierFlags: [])
         XCTAssertEqual(points.value as? String, "入 \(firstExit)   出 \(secondTime)")
+        let handle = app.descendants(matching: .any).matching(identifier: "mainWaveHeightHandle").firstMatch
+        XCTAssertTrue(handle.waitForExistence(timeout: 3))
+        handle.doubleClick()
+        let automaticY = handle.frame.midY
+        let grip = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        grip.press(forDuration: 0.1, thenDragTo: grip.withOffset(CGVector(dx: 0, dy: -60)))
+        XCTAssertEqual(handle.frame.midY, automaticY - 60, accuracy: 4)
+        grip.press(forDuration: 0.1, thenDragTo: grip.withOffset(CGVector(dx: 0, dy: 25)))
+        XCTAssertEqual(handle.frame.midY, automaticY - 35, accuracy: 4)
+        XCTAssertEqual(app.staticTexts["playheadTime"].value as? String, secondTime)
+        XCTAssertEqual(points.value as? String, "入 \(firstExit)   出 \(secondTime)")
+        let resizedOffset = handle.frame.midY - waveform.frame.minY
         let end = app.textFields["rangeEnd"]
         XCTAssertTrue(end.waitForExistence(timeout: 5))
         end.click(); end.typeKey("a", modifierFlags: .command); end.typeText("11.50")
@@ -177,6 +189,9 @@ final class WorkspaceUITests: XCTestCase {
         openStudy(in: app)
         XCTAssertTrue(end.waitForExistence(timeout: 10))
         XCTAssertEqual(end.value as? String, "11.500")
+        XCTAssertEqual(handle.frame.midY - waveform.frame.minY, resizedOffset, accuracy: 2)
+        handle.doubleClick()
+        XCTAssertEqual(handle.frame.midY, automaticY, accuracy: 2)
         // Panning the zoomed waveform and dragging its overview both move the same viewport.
         app.sliders["时间轴缩放"].coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.5)).click()
         let navigator = app.sliders["滚动时间轴"]

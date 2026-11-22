@@ -551,16 +551,28 @@ private struct WorkspaceTimeline: View {
     let onSelect: (Mark) -> Void
     let onResize: (String, Bool, Double) -> Void
 
+    @AppStorage("mainWaveHeight") private var preferredHeight: Double?
+    @State private var resize: (start: CGFloat, height: CGFloat)?
+
     var body: some View {
         let span = song.duration / studio.zoom
         let offset = pan * (song.duration - span)
         let window = offset...(offset + span)
         Group {
-            HStack(spacing: 0) {
-                TrackGutter(studio: studio, record: song, bars: $bars)
-                TimelineCanvas(studio: studio, song: song, window: window, bars: bars,
-                               inShortcut: inShortcut, outShortcut: outShortcut, onSelect: onSelect, onResize: onResize,
-                               onPan: { pan = min(1, max(0, pan + $0)) })
+            GeometryReader { geometry in
+                let height = resize?.height ?? preferredHeight.map { CGFloat($0) }
+                let layout = CanvasLayout(record: song, visible: studio.visibleKinds, hidden: studio.hiddenLanes,
+                                          selected: studio.selected, height: geometry.size.height,
+                                          scroll: studio.laneScroll, waveHeight: height)
+                HStack(spacing: 0) {
+                    TrackGutter(studio: studio, record: song, layout: layout, bars: $bars)
+                    TimelineCanvas(studio: studio, song: song, window: window, bars: bars, waveHeight: height,
+                                   inShortcut: inShortcut, outShortcut: outShortcut, onSelect: onSelect, onResize: onResize,
+                                   onPan: { pan = min(1, max(0, pan + $0)) })
+                }
+                .overlay(alignment: .top) {
+                    heightHandle(layout).offset(y: layout.lanesTop - 8)
+                }
             }
             .frame(minHeight: 210, maxHeight: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -572,6 +584,36 @@ private struct WorkspaceTimeline: View {
             }
         }
     }
+
+    private func heightHandle(_ layout: CanvasLayout) -> some View {
+        let current = layout.waveBottom - CanvasLayout.waveTop
+        return Capsule()
+            .fill(Tone.pencil.color)
+            .frame(width: 32, height: 3)
+            .frame(maxWidth: .infinity)
+            .frame(height: 8)
+            .contentShape(Rectangle())
+            .pointerStyle(.rowResize)
+            .onTapGesture(count: 2) { preferredHeight = nil }
+            // The handle moves during a drag. Measure from its initial screen position and save only on release.
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global).onChanged { value in
+                let start = resize?.start ?? current
+                let height = min(layout.waveHeightRange.upperBound, max(layout.waveHeightRange.lowerBound, start + value.translation.height))
+                resize = (start, height)
+            }.onEnded { _ in
+                if let resize { preferredHeight = Double(resize.height) }
+                resize = nil
+            })
+            .help("上下拖动调整主波形高度，双击恢复自动高度")
+            .accessibilityElement()
+            .accessibilityLabel("主波形高度")
+            .accessibilityIdentifier("mainWaveHeightHandle")
+            .accessibilityValue("\(Int(current)) 点")
+            .accessibilityAdjustableAction { direction in
+                preferredHeight = min(layout.waveHeightRange.upperBound,
+                                      max(layout.waveHeightRange.lowerBound, current + (direction == .increment ? 8 : -8)))
+            }
+    }
 }
 
 /// Isolates the per-frame cursor read so playback only refreshes the canvas wrapper.
@@ -580,6 +622,7 @@ private struct TimelineCanvas: View {
     let song: SongRecord
     let window: ClosedRange<Double>
     let bars: Bool
+    let waveHeight: CGFloat?
     let inShortcut: String
     let outShortcut: String
     let onSelect: (Mark) -> Void
@@ -593,7 +636,7 @@ private struct TimelineCanvas: View {
                      inShortcut: inShortcut, outShortcut: outShortcut, onShortcut: studio.markPoint,
                      onMovePoint: studio.setPoint, onSeek: studio.seek, onPick: onSelect,
                      onRange: { studio.selection = $0; studio.seek($0.lowerBound) }, onResize: onResize, bars: bars,
-                     hiddenLanes: studio.hiddenLanes, laneScroll: studio.laneScroll, onLaneScroll: { studio.laneScroll = $0 },
+                     hiddenLanes: studio.hiddenLanes, laneScroll: studio.laneScroll, waveHeight: waveHeight, onLaneScroll: { studio.laneScroll = $0 },
                      onPan: onPan, palette: palette)
             .accessibilityIdentifier("waveform")
             .help("在顶部时间尺点击或拖动可定位播放头；在波形上拖动可设置出入点。")

@@ -20,6 +20,14 @@ struct TimelineInteractionTests {
         }
         let small = CanvasLayout(record: song, visible: visible, selected: nil, height: 300)
         #expect(small.overflows && small.firstLane == 0 && !small.canScrollUp && small.canScrollDown)
+        let compact = CanvasLayout(record: song, visible: visible, selected: nil, height: 420, waveHeight: 95)
+        #expect(compact.waveBottom - CanvasLayout.waveTop == 95)
+        #expect(compact.laneTop(0) > compact.waveBottom)
+        let expanded = CanvasLayout(record: song, visible: visible, selected: nil, height: 420, scroll: 99, waveHeight: 800)
+        #expect(expanded.visibleCount == 1 && expanded.visibleLanes.upperBound == expanded.lanes.count)
+        #expect(expanded.laneTop(expanded.firstLane) + CanvasLayout.laneHeight <= expanded.height)
+        let empty = CanvasLayout(record: song, visible: [], selected: nil, height: 210, waveHeight: 1)
+        #expect(empty.lanesTop == CanvasLayout.lanesFloor && empty.visibleCount == 0)
         // Hiding one event sub-lane removes only that lane.
         let hidden = CanvasLayout(record: song, visible: visible, hidden: ["event:vocals"], selected: nil, height: 900)
         #expect(hidden.lanes.filter { $0.hasPrefix("event:") } == ["event:silence", "event:drums", "event:bass"])

@@ -26,9 +26,11 @@ struct CanvasLayout {
     /// Number of lanes drawn at once, and the index of the first one.
     let visibleCount: Int
     let firstLane: Int
+    let lanesTop: CGFloat
+    let waveHeightRange: ClosedRange<CGFloat>
 
     init(record: SongRecord, visible: Set<String>, hidden: Set<String> = [], selected: String?, height: CGFloat,
-         scroll: Int = 0) {
+         scroll: Int = 0, waveHeight: CGFloat? = nil) {
         let picked = visible.contains("event") ? selected.flatMap { id in record.marks.first { $0.id == id } } : nil
         // A selected semantic event borrows the insight lane so its range is visible.
         let semanticEvent = picked?.kind == "insight" && picked?.fields["category"]?.value == "event" && visible.contains("event")
@@ -43,8 +45,16 @@ struct CanvasLayout {
         }
         lanes = ordinary + events
         self.height = height
-        let capacity = max(1, Int((height - 4 - Self.lanesFloor - 1) / Self.laneStep))
+        // Reserve the cue controls above and at least one scrollable data lane below.
+        let minWaveHeight = Self.lanesFloor - Self.waveTop - 6
+        let bottom = lanes.isEmpty ? height : height - 5
+        let maxWaveHeight = bottom - (lanes.isEmpty ? 0 : Self.laneStep) - Self.waveTop - 6
+        waveHeightRange = minWaveHeight...max(minWaveHeight, maxWaveHeight)
+        let fitted = min(waveHeightRange.upperBound, max(minWaveHeight, waveHeight ?? minWaveHeight))
+        let capacity = max(1, Int((bottom - Self.waveTop - 6 - fitted) / Self.laneStep))
         visibleCount = min(lanes.count, capacity)
+        // In automatic mode the last visible lane stays aligned with the bottom of the canvas.
+        lanesTop = waveHeight == nil ? bottom - CGFloat(visibleCount) * Self.laneStep : Self.waveTop + fitted + 6
         firstLane = min(max(0, scroll), lanes.count - visibleCount)
     }
 
@@ -56,8 +66,7 @@ struct CanvasLayout {
     var canScrollUp: Bool { firstLane > 0 }
     var canScrollDown: Bool { firstLane + visibleCount < lanes.count }
     /// Only meaningful for indices in `visibleLanes`.
-    func laneTop(_ index: Int) -> CGFloat { height - 4 - Self.laneStep * CGFloat(firstLane + visibleCount - index) }
-    var lanesTop: CGFloat { lanes.isEmpty ? height : height - 4 - Self.laneStep * CGFloat(visibleCount) - 1 }
+    func laneTop(_ index: Int) -> CGFloat { lanesTop + 1 + Self.laneStep * CGFloat(index - firstLane) }
     var waveBottom: CGFloat { max(Self.waveTop + 12, lanesTop - 6) }
     var waveMid: CGFloat { (Self.waveTop + waveBottom) / 2 }
     var waveHalf: CGFloat { max(6, (waveBottom - Self.waveTop) / 2) }
@@ -86,6 +95,7 @@ struct WaveformView: NSViewRepresentable {
     /// Event sub-lanes the person hid individually, and the first lane shown when lanes overflow.
     var hiddenLanes: Set<String> = []
     var laneScroll = 0
+    var waveHeight: CGFloat?
     var onLaneScroll: (Int) -> Void = { _ in }
     /// Relative swipe distance on the navigator’s 0...1 scale. Events can arrive between SwiftUI updates.
     var onPan: (Double) -> Void = { _ in }
@@ -248,7 +258,7 @@ final class WaveCanvas: NSView {
             || old.peaks.count != new.peaks.count || old.visible != new.visible || old.selected != new.selected
             || old.window != new.window
             || old.bars != new.bars
-            || old.hiddenLanes != new.hiddenLanes || old.laneScroll != new.laneScroll || old.palette != new.palette
+            || old.hiddenLanes != new.hiddenLanes || old.laneScroll != new.laneScroll || old.waveHeight != new.waveHeight || old.palette != new.palette
     }
 
     /// A module that just finished fades its lanes in. This is the only motion not caused by the user.
@@ -678,7 +688,7 @@ final class WaveCanvas: NSView {
 
     private func laneLayout(_ i: WaveformView) -> CanvasLayout {
         CanvasLayout(record: i.record, visible: i.visible, hidden: i.hiddenLanes, selected: i.selected,
-                     height: bounds.height, scroll: i.laneScroll)
+                     height: bounds.height, scroll: i.laneScroll, waveHeight: i.waveHeight)
     }
 
     /// A thin bar at the right edge shows which part of the lane list is in view.
